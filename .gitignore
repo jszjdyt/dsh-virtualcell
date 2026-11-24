@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+
+# Node
+node_modules/
+*.log
+
+# macOS
+.DS_Store
+._*
+
+# runtime artifacts
+work/
+exports/
+figures/
+mpl-cache/
+downloads/
+*.h5ad.gz
+*.tgz
+
+# test tmp
+test/tmp/
+test/output/
+.pytest_cache/

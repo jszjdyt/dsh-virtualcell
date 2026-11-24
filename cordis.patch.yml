@@ -1,0 +1,9 @@
+# dsh-virtualcell bundle patch
+# 一个 Host 插件（/virtualcell HTTP 路由 + virtualcell agent 工具 + prompt section）
+# 加一个 Client 整页（main 槽 key=virtualcell，侧边栏 panellist 入口）。
+# id 与 name 必须等于包名 dsh-virtualcell：Client 模块 loader id 要与包名一致，
+# 否则 client.js 里的 window.__ModuleLoader__.load({ id }) 对不上。
+- insert:
+    - id: dsh-virtualcell
+      name: 'dsh-virtualcell'
+      config: {}

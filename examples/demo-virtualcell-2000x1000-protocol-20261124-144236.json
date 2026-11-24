@@ -1,0 +1,613 @@
+{
+  "tool": {
+    "name": "dsh-virtualcell",
+    "version": "0.1.0"
+  },
+  "createdAt": "2026-11-24T14:42:36+0800",
+  "dataset": {
+    "id": "ds1",
+    "name": "demo-virtualcell-2000x1000",
+    "n_cells": 2000,
+    "n_genes": 1000,
+    "source": "demo",
+    "sha256": null
+  },
+  "steps": [
+    {
+      "step": "qc",
+      "status": "ok",
+      "at": "2026-11-24T14:42:29+0800",
+      "ms": 10760,
+      "summary": "质控：2000 → 2000 个细胞（保留 100.0%），1000 → 1000 个基因；每细胞中位 803 个基因 / 32715 UMIs，无 MT- 基因（跳过线粒体过滤）；去除 0 个细胞。",
+      "metrics": {
+        "n_cells_before": 2000,
+        "n_cells_after": 2000,
+        "n_genes_before": 1000,
+        "n_genes_after": 1000,
+        "n_cells_removed": 0,
+        "n_genes_removed": 0,
+        "pct_cells_kept": 100.0,
+        "median_n_genes": 803.0,
+        "median_n_counts": 32715.0,
+        "median_mito_pct": 0.0,
+        "n_mito_genes": 0,
+        "min_genes": 200,
+        "max_genes": 0,
+        "max_mito": 20.0,
+        "min_cells": 3,
+        "fallback": false,
+        "runtime_s": 0.01
+      },
+      "warnings": [
+        "未找到 MT- 开头的线粒体基因，线粒体占比全部记 0，mito 过滤已跳过"
+      ]
+    },
+    {
+      "step": "state",
+      "status": "ok",
+      "at": "2026-11-24T14:42:34+0800",
+      "ms": 4656,
+      "summary": "状态表征：2000 个细胞 × 1000 个基因（HVG 999）→ 6 个状态；PC1–PC30 解释 24.1% 方差；轮廓系数 0.15；2D 嵌入用 TSNE。",
+      "metrics": {
+        "n_cells": 2000,
+        "n_genes": 1000,
+        "n_hvg": 999,
+        "n_pcs": 30,
+        "n_clusters": 6,
+        "silhouette": 0.1503,
+        "variance_explained": 0.241,
+        "knn_k": 15,
+        "embedding": "tsne",
+        "backend": "builtin",
+        "seed": 0,
+        "runtime_s": 4.402
+      },
+      "warnings": []
+    },
+    {
+      "step": "annotate",
+      "status": "ok",
+      "at": "2026-11-24T14:42:35+0800",
+      "ms": 121,
+      "summary": "状态注释：6 个状态簇中 6 个匹配参考面板、0 个 Unknown（覆盖 2000/2000 个细胞）；平均 margin 1.03；最高分 1.69 对应 Dendritic cell（zscore 打分）。",
+      "metrics": {
+        "assigned": 6,
+        "unknown": 0,
+        "mean_margin": 1.0281,
+        "assigned_cells": 2000,
+        "unknown_cells": 0,
+        "n_states": 20,
+        "n_clusters": 6,
+        "method": "zscore",
+        "panel": "builtin",
+        "runtime_s": 0.013
+      },
+      "warnings": []
+    },
+    {
+      "step": "grn",
+      "status": "ok",
+      "at": "2026-11-24T14:42:35+0800",
+      "ms": 650,
+      "summary": "在 2,000 个细胞 × 1,000 个基因上推断出 18,208 条有向边（147 个 TF × 853 个 target，6 个状态；来源：coexpression_ridge）；最大 hub 是 RUNX3（出度 157，平均 |w|=0.3148）；5 折交叉验证 R²=0.27。共表达推断，方向性证据弱，需实验验证。",
+      "metrics": {
+        "n_edges": 18208,
+        "n_tfs": 147,
+        "n_targets": 853,
+        "density": 0.050123,
+        "hub_tfs": [
+          {
+            "tf": "RUNX3",
+            "out_degree": 157,
+            "mean_abs_weight": 0.3148,
+            "total_weight": 49.42
+          },
+          {
+            "tf": "HIF1A",
+            "out_degree": 163,
+            "mean_abs_weight": 0.2967,
+            "total_weight": 48.3695
+          },
+          {
+            "tf": "ZEB1",
+            "out_degree": 197,
+            "mean_abs_weight": 0.2386,
+            "total_weight": 47.0088
+          },
+          {
+            "tf": "MAFB",
+            "out_degree": 177,
+            "mean_abs_weight": 0.2652,
+            "total_weight": 46.9456
+          },
+          {
+            "tf": "HOXC6",
+            "out_degree": 161,
+            "mean_abs_weight": 0.2768,
+            "total_weight": 44.5654
+          },
+          {
+            "tf": "SPI1",
+            "out_degree": 163,
+            "mean_abs_weight": 0.2724,
+            "total_weight": 44.399
+          },
+          {
+            "tf": "FOXM1",
+            "out_degree": 159,
+            "mean_abs_weight": 0.2782,
+            "total_weight": 44.2336
+          },
+          {
+            "tf": "KLF4",
+            "out_degree": 157,
+            "mean_abs_weight": 0.28,
+            "total_weight": 43.9645
+          },
+          {
+            "tf": "KLF2",
+            "out_degree": 166,
+            "mean_abs_weight": 0.2642,
+            "total_weight": 43.8493
+          },
+          {
+            "tf": "RELB",
+            "out_degree": 161,
+            "mean_abs_weight": 0.268,
+            "total_weight": 43.1455
+          }
+        ],
+        "cv_r2": 0.2669,
+        "runtime_s": 0.53,
+        "n_cells": 2000,
+        "n_clusters": 6,
+        "alpha": 0.1,
+        "n_candidate_pairs": 9229,
+        "n_scored_pairs": 6285,
+        "n_user_edges": 0,
+        "n_coexpression_candidates": 13230,
+        "blocked": false,
+        "prior": "coexpression",
+        "cluster_sizes": [
+          496,
+          376,
+          353,
+          293,
+          279,
+          203
+        ]
+      },
+      "warnings": [
+        "113 个 TF 候选不在表达基因里，已跳过（保留 147 个）",
+        "候选边：全局共表达 top60 ∪ 簇内共表达 top30，去重后 9,229 对（0.2s）"
+      ]
+    },
+    {
+      "step": "validate",
+      "status": "ok",
+      "at": "2026-11-24T14:42:36+0800",
+      "ms": 400,
+      "summary": "边存在性：AUROC=0.9846、AUPRC=0.9478、top100 精准率=1.0（真值边 1858 条 / 125391 对候选）；留出扰动 5 个：Δ 的 top200 Spearman 均值=0.8144、Pearson 均值=0.8366、top20 Jaccard=0.6109。判定：通过。",
+      "metrics": {
+        "grn_auroc": 0.9846,
+        "grn_auprc": 0.9478,
+        "grn_top100_precision": 1.0,
+        "delta_spearman_mean": 0.8144,
+        "delta_pearson_mean": 0.8366,
+        "jaccard_top20_mean": 0.6109,
+        "n_heldout": 5,
+        "delta_spearman_all_mean": 0.6653,
+        "n_truth_edges": 1858,
+        "n_pairs": 125391,
+        "runtime_s": 0.28,
+        "sign_agreement": 0.7041
+      },
+      "warnings": [
+        "校验口径：限定在共表达候选边空间（9,229 对，阳性 1839 条）内计算 AUROC/AUPRC"
+      ]
+    },
+    {
+      "step": "perturb",
+      "status": "ok",
+      "at": "2026-11-24T14:42:36+0800",
+      "ms": 177,
+      "summary": "敲除（KO） HIF1A（strength=1，传播 3 轮）：预测细胞状态从 0 向 5 偏移（state_shift=0.094）；受影响基因 46 个，top3：DUSP2、SLC43A1、TYK2；最显著通路：细胞周期（up，q=0.0252）。这是基于共表达 GRN 的假说，需实验验证。",
+      "metrics": {
+        "n_affected": 46,
+        "max_abs_delta": 1.9893,
+        "state_shift": 0.0944,
+        "target_state": "5",
+        "source_state": "0",
+        "confidence": "medium",
+        "backend": "builtin",
+        "seed": 0,
+        "n_prop": 3,
+        "n_edges_used": 18208,
+        "gene": "HIF1A",
+        "mode": "knockout",
+        "runtime_s": 0.05
+      },
+      "warnings": [
+        "状态位移按各状态细胞数加权；如需单状态解释，用 cluster 参数指定"
+      ]
+    },
+    {
+      "step": "screen",
+      "status": "ok",
+      "at": "2026-11-24T14:42:36+0800",
+      "ms": 537,
+      "summary": "对 40 个 TF 做虚拟敲除（KO）筛选：top1 是 KLF2（score=0.207，状态位移 0.206，特异度 0.01），预测细胞状态向 2 偏移。排序是假说，需要实验验证。",
+      "metrics": {
+        "n_screened": 40,
+        "n_requested": 40,
+        "top1": "KLF2",
+        "top1_score": 0.2075,
+        "mode": "knockout",
+        "specificity": true,
+        "runtime_s": 0.52
+      },
+      "warnings": []
+    },
+    {
+      "step": "transition",
+      "status": "ok",
+      "at": "2026-11-24T14:42:36+0800",
+      "ms": 55,
+      "summary": "状态转移：6 个状态、2000 个细胞、20000 条 kNN 边；对角均值 0.89，最强净转移 5→3（0.004）；主净流出 5（+0.044）、主净流入 0（-0.022）；bootstrap 稳定度 1.00（100 次）。",
+      "metrics": {
+        "n_states": 6,
+        "stability": 0.9952,
+        "diag_mean": 0.8886,
+        "n_cells": 2000,
+        "n_edges": 20000,
+        "k": 10,
+        "temperature": 0.1,
+        "method": "knn",
+        "n_boot": 100,
+        "runtime_s": 0.018
+      },
+      "warnings": []
+    },
+    {
+      "step": "insight",
+      "status": "ok",
+      "at": "2026-11-24T14:42:36+0800",
+      "ms": 1,
+      "summary": "在 2,000 个细胞上建立了状态空间与调控网络，虚拟扰动 HIF1A 预测状态向 5 偏移。",
+      "metrics": {
+        "n_sections": 4,
+        "n_targets": 7
+      },
+      "warnings": []
+    },
+    {
+      "step": "response",
+      "status": "ok",
+      "at": "2026-11-24T14:42:36+0800",
+      "ms": 48,
+      "summary": "5 个扰动（control 200 细胞，共 800 细胞）：loo 交叉验证 R²=-0.417（均值位移基线 -0.079，优于基线：否）；Spearman=0.154；HVG 空间 top-5 基因重合度 0%；方法=additive，隐空间维度=30",
+      "metrics": {
+        "method": "additive",
+        "requested_method": "additive",
+        "n_pert": 5,
+        "n_cells": 800,
+        "n_control_cells": 200,
+        "r2": -0.4167,
+        "spearman": 0.1535,
+        "baseline_r2": -0.0789,
+        "baseline_spearman": 0.2976,
+        "beats_baseline": false,
+        "latent_dim": 30,
+        "cv": "loo",
+        "n_features": 2,
+        "feature_names": [
+          "ctrl_expr",
+          "ctrl_expr_z"
+        ],
+        "n_pert_genes_resolved": 5,
+        "ridge_alpha": 100.0,
+        "ridge_backend": "sklearn",
+        "top_overlap": 0.0,
+        "n_genes": 1000,
+        "n_hvg_used": 999,
+        "n_genes_matched": 1000,
+        "n_ignored_columns": 0,
+        "inverse_scale": 5.195838,
+        "per_gene_err_mean": 0.263351,
+        "data_format": "wide",
+        "mode": "perturb_table"
+      },
+      "warnings": [
+        "R²=-0.417 为负：模型预测不如直接取均值，扰动间响应模式差异无法由 control 基线解释",
+        "加性模型未超过均值位移基线：未见扰动的响应更可能由「共享平均位移」主导，不要据此宣称可泛化预测"
+      ]
+    }
+  ],
+  "params": {
+    "qc": {
+      "min_genes": 200,
+      "max_genes": 0,
+      "max_mito": 20,
+      "min_cells": 3
+    },
+    "state": {
+      "n_hvg": 1500,
+      "n_pcs": 30,
+      "n_neighbors": 15,
+      "cluster": "auto",
+      "resolution": 0.8,
+      "n_clusters": 0,
+      "latent": "pca",
+      "embedding": "auto"
+    },
+    "annotate": {
+      "panel": "builtin",
+      "min_score": 0.3,
+      "method": "zscore",
+      "column": "cell_state"
+    },
+    "grn": {
+      "method": "ridge",
+      "prior": "coexpression",
+      "alpha": 0.1,
+      "top_targets": 2000,
+      "min_cells": 30,
+      "n_boot": 0
+    },
+    "validate": {
+      "min_edges": 20,
+      "top_k": 100
+    },
+    "perturb": {
+      "gene": "",
+      "mode": "knockout",
+      "strength": 1.0,
+      "cluster": "all",
+      "n_prop": 3,
+      "top_n": 30
+    },
+    "screen": {
+      "genes": [],
+      "mode": "knockout",
+      "top_n": 20,
+      "specificity": true
+    },
+    "transition": {
+      "method": "knn",
+      "temperature": 0.1,
+      "k": 10
+    },
+    "insight": {
+      "depth": "standard"
+    },
+    "response": {
+      "method": "additive",
+      "nfold": 5,
+      "latent_dim": 0
+    }
+  },
+  "runs": [
+    {
+      "id": "run-0010",
+      "dataset": "ds1",
+      "step": "response",
+      "label": "响应预测",
+      "status": "ok",
+      "startedAt": "2026-11-24T14:42:36+0800",
+      "durationMs": 971,
+      "figures": 1,
+      "tables": 2,
+      "dir": "/var/folders/wx/r0kw5bd91n78rlckzhd4ylw40000gn/T/vc-examples-n7a916x1/datasets/ds1/runs/run-0010",
+      "summary": "5 个扰动（control 200 细胞，共 800 细胞）：loo 交叉验证 R²=-0.417（均值位移基线 -0.079，优于基线：否）；Spearman=0.154；HVG 空间 top-5 基因重合度 0%；方法=additive，隐空间维度=30"
+    },
+    {
+      "id": "run-0009",
+      "dataset": "ds1",
+      "step": "insight",
+      "label": "智能分析",
+      "status": "ok",
+      "startedAt": "2026-11-24T14:42:36+0800",
+      "durationMs": 918,
+      "figures": 0,
+      "tables": 1,
+      "dir": "/var/folders/wx/r0kw5bd91n78rlckzhd4ylw40000gn/T/vc-examples-n7a916x1/datasets/ds1/runs/run-0009",
+      "summary": "在 2,000 个细胞上建立了状态空间与调控网络，虚拟扰动 HIF1A 预测状态向 5 偏移。"
+    },
+    {
+      "id": "run-0008",
+      "dataset": "ds1",
+      "step": "transition",
+      "label": "状态转移",
+      "status": "ok",
+      "startedAt": "2026-11-24T14:42:36+0800",
+      "durationMs": 911,
+      "figures": 2,
+      "tables": 1,
+      "dir": "/var/folders/wx/r0kw5bd91n78rlckzhd4ylw40000gn/T/vc-examples-n7a916x1/datasets/ds1/runs/run-0008",
+      "summary": "状态转移：6 个状态、2000 个细胞、20000 条 kNN 边；对角均值 0.89，最强净转移 5→3（0.004）；主净流出 5（+0.044）、主净流入 0（-0.022）；bootstrap 稳定度 1.00（100 次）。"
+    },
+    {
+      "id": "run-0007",
+      "dataset": "ds1",
+      "step": "screen",
+      "label": "虚拟筛选",
+      "status": "ok",
+      "startedAt": "2026-11-24T14:42:36+0800",
+      "durationMs": 851,
+      "figures": 1,
+      "tables": 1,
+      "dir": "/var/folders/wx/r0kw5bd91n78rlckzhd4ylw40000gn/T/vc-examples-n7a916x1/datasets/ds1/runs/run-0007",
+      "summary": "对 40 个 TF 做虚拟敲除（KO）筛选：top1 是 KLF2（score=0.207，状态位移 0.206，特异度 0.01），预测细胞状态向 2 偏移。排序是假说，需要实验验证。"
+    },
+    {
+      "id": "run-0006",
+      "dataset": "ds1",
+      "step": "perturb",
+      "label": "虚拟扰动：HIF1A（自动选 hub）",
+      "status": "ok",
+      "startedAt": "2026-11-24T14:42:36+0800",
+      "durationMs": 307,
+      "figures": 3,
+      "tables": 3,
+      "dir": "/var/folders/wx/r0kw5bd91n78rlckzhd4ylw40000gn/T/vc-examples-n7a916x1/datasets/ds1/runs/run-0006",
+      "summary": "敲除（KO） HIF1A（strength=1，传播 3 轮）：预测细胞状态从 0 向 5 偏移（state_shift=0.094）；受影响基因 46 个，top3：DUSP2、SLC43A1、TYK2；最显著通路：细胞周期（up，q=0.0252）。这是基于共表达 GRN 的假说，需实验验证。"
+    },
+    {
+      "id": "run-0005",
+      "dataset": "ds1",
+      "step": "validate",
+      "label": "网络校验",
+      "status": "ok",
+      "startedAt": "2026-11-24T14:42:35+0800",
+      "durationMs": 1124,
+      "figures": 2,
+      "tables": 2,
+      "dir": "/var/folders/wx/r0kw5bd91n78rlckzhd4ylw40000gn/T/vc-examples-n7a916x1/datasets/ds1/runs/run-0005",
+      "summary": "边存在性：AUROC=0.9846、AUPRC=0.9478、top100 精准率=1.0（真值边 1858 条 / 125391 对候选）；留出扰动 5 个：Δ 的 top200 Spearman 均值=0.8144、Pearson 均值=0.8366、top20 Jaccard=0.6109。判定：通过。"
+    },
+    {
+      "id": "run-0004",
+      "dataset": "ds1",
+      "step": "grn",
+      "label": "调控网络",
+      "status": "ok",
+      "startedAt": "2026-11-24T14:42:35+0800",
+      "durationMs": 666,
+      "figures": 3,
+      "tables": 2,
+      "dir": "/var/folders/wx/r0kw5bd91n78rlckzhd4ylw40000gn/T/vc-examples-n7a916x1/datasets/ds1/runs/run-0004",
+      "summary": "在 2,000 个细胞 × 1,000 个基因上推断出 18,208 条有向边（147 个 TF × 853 个 target，6 个状态；来源：coexpression_ridge）；最大 hub 是 RUNX3（出度 157，平均 |w|=0.3148）；5 折交叉验证 R²=0.27。共表达推断，方向性证据弱，需实验验证。"
+    },
+    {
+      "id": "run-0003",
+      "dataset": "ds1",
+      "step": "annotate",
+      "label": "状态注释",
+      "status": "ok",
+      "startedAt": "2026-11-24T14:42:34+0800",
+      "durationMs": 1009,
+      "figures": 1,
+      "tables": 2,
+      "dir": "/var/folders/wx/r0kw5bd91n78rlckzhd4ylw40000gn/T/vc-examples-n7a916x1/datasets/ds1/runs/run-0003",
+      "summary": "状态注释：6 个状态簇中 6 个匹配参考面板、0 个 Unknown（覆盖 2000/2000 个细胞）；平均 margin 1.03；最高分 1.69 对应 Dendritic cell（zscore 打分）。"
+    },
+    {
+      "id": "run-0002",
+      "dataset": "ds1",
+      "step": "state",
+      "label": "状态表征",
+      "status": "ok",
+      "startedAt": "2026-11-24T14:42:30+0800",
+      "durationMs": 4875,
+      "figures": 2,
+      "tables": 3,
+      "dir": "/var/folders/wx/r0kw5bd91n78rlckzhd4ylw40000gn/T/vc-examples-n7a916x1/datasets/ds1/runs/run-0002",
+      "summary": "状态表征：2000 个细胞 × 1000 个基因（HVG 999）→ 6 个状态；PC1–PC30 解释 24.1% 方差；轮廓系数 0.15；2D 嵌入用 TSNE。"
+    },
+    {
+      "id": "run-0001",
+      "dataset": "ds1",
+      "step": "qc",
+      "label": "质控",
+      "status": "ok",
+      "startedAt": "2026-11-24T14:42:18+0800",
+      "durationMs": 12208,
+      "figures": 1,
+      "tables": 2,
+      "dir": "/var/folders/wx/r0kw5bd91n78rlckzhd4ylw40000gn/T/vc-examples-n7a916x1/datasets/ds1/runs/run-0001",
+      "summary": "质控：2000 → 2000 个细胞（保留 100.0%），1000 → 1000 个基因；每细胞中位 803 个基因 / 32715 UMIs，无 MT- 基因（跳过线粒体过滤）；去除 0 个细胞。"
+    }
+  ],
+  "engine": {
+    "python": "/Library/Frameworks/Python.framework/Versions/3.14/bin/python3",
+    "pythonVersion": "3.14.2",
+    "platform": "macOS-27.3-arm64-arm-64bit-Mach-O",
+    "backend": "builtin",
+    "packages": {
+      "numpy": "2.5.1",
+      "pandas": "2.3.3",
+      "scipy": "1.17.1",
+      "sklearn": "1.9.0",
+      "anndata": "0.12.19",
+      "h5py": "3.16.0",
+      "matplotlib": "3.11.0",
+      "PIL": "12.2.0"
+    },
+    "adapters": [
+      {
+        "id": "scanpy",
+        "module": "scanpy",
+        "label": "scanpy",
+        "capability": "Leiden 聚类 / UMAP / HVG",
+        "hint": "pip install scanpy",
+        "available": false,
+        "version": null
+      },
+      {
+        "id": "scvi",
+        "module": "scvi",
+        "label": "scVI",
+        "capability": "概率隐空间 / 差异表达",
+        "hint": "pip install scvi-tools",
+        "available": false,
+        "version": null
+      },
+      {
+        "id": "celloracle",
+        "module": "celloracle",
+        "label": "CellOracle",
+        "capability": "官方 GRN 扰动模拟",
+        "hint": "pip install celloracle",
+        "available": false,
+        "version": null
+      },
+      {
+        "id": "gears",
+        "module": "gears",
+        "label": "GEARS",
+        "capability": "扰动响应预测（GNN）",
+        "hint": "pip install gears",
+        "available": false,
+        "version": null
+      },
+      {
+        "id": "scgpt",
+        "module": "scgpt",
+        "label": "scGPT",
+        "capability": "单细胞基础模型嵌入",
+        "hint": "pip install scgpt + 下载权重",
+        "available": false,
+        "version": null
+      },
+      {
+        "id": "geneformer",
+        "module": "geneformer",
+        "label": "Geneformer",
+        "capability": "基础模型 in-silico 扰动",
+        "hint": "pip install geneformer + 下载权重",
+        "available": false,
+        "version": null
+      },
+      {
+        "id": "state",
+        "module": "arc_state",
+        "label": "State (Arc)",
+        "capability": "ST/SE 扰动响应预测",
+        "hint": "pip install arc-state + 下载权重",
+        "available": false,
+        "version": null
+      }
+    ],
+    "workdir": "/var/folders/wx/r0kw5bd91n78rlckzhd4ylw40000gn/T/vc-examples-n7a916x1",
+    "startedAt": 1795502538.202202,
+    "modules": {
+      "vc_io": true,
+      "vc_state": true,
+      "vc_grn": true,
+      "vc_response": true,
+      "vc_plot": true
+    },
+    "moduleErrors": {}
+  },
+  "reproduce": "python3 lib/vc_engine.py --workdir <workdir> 后用相同 steps/params 依次调用 run"
+}
