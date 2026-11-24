@@ -1,0 +1,64 @@
+{
+  "name": "dsh-virtualcell",
+  "version": "0.1.0",
+  "private": true,
+  "description": "虚拟细胞工作台（DeepSeek Harness 插件）：输入单细胞表达谱 → 状态表征 → 调控网络 → 虚拟敲除/过表达/药物扰动 → 扰动响应预测 → 状态转移 → 虚拟筛选 → 自检与智能分析；每步出图、原始数据不可变保留、参数有推荐与扫描。",
+  "icon": "icon.svg",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "lib/*.mjs",
+    "lib/*.py",
+    "test/",
+    "examples/",
+    "README.md",
+    "CONTRACT.md",
+    "DESIGN.md",
+    "INSTALL.md",
+    "CHANGELOG.md",
+    "requirements.txt",
+    "!lib/__pycache__/**",
+    "!test/figs/**"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "virtual-cell",
+    "aivc",
+    "single-cell",
+    "perturbation",
+    "grn",
+    "celloracle",
+    "in-silico-perturbation",
+    "gene-regulatory-network"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
