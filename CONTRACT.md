@@ -258,6 +258,7 @@ stdout 只允许协议行，日志走 stderr。所有 result 必须可 JSON 化�
 | `.zip/.tar(.gz)` | 解包后递归嗅探 | 找 10x 三件套或唯一数据文件 |
 | GEO series matrix | `*_series_matrix.txt(.gz)` | 兼容老数据 |
 | URL | http(s) | 下载后按上表识别（≤8 GB） |
+| R 单细胞对象 | `.rds` / `.RData` / `.rda` | Seurat v3–v5 / SingleCellExperiment / matrix / data.frame；由 `lib/vc_rbridge.R` 调本机 Rscript 导出中立文件；多对象用 `object` 指定（`ambiguous` + candidates） |
 | 扰动表 `attach kind=perturb_table` | CSV/TSV/H5AD | 列：`cell_id,perturbation[,gene columns…]` 或 h5ad `obs['perturbation']` |
 | 基因集 `kind=gene_set` | CSV/GMT/TXT | 用于签名投影/富集 |
 | GRN 先验 `kind=grn_prior` | CSV（`tf,target[,sign,weight]`） | 有先验时 `prior='user'`，方向性证据更强 |

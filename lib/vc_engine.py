@@ -122,8 +122,8 @@ STEPS = [
         "params": [
             _p("panel", "参考面板", "select", "builtin",
                options=[{"value": "builtin", "label": "内置 20 类状态面板"}], risk="low"),
-            _p("min_score", "最低置信度", "number", 0.3, min=0.0, max=2.0, step=0.05,
-               effect="低于阈值标为 Unknown", risk="low"),
+            _p("min_score", "最低证据分", "number", 0.3, min=0.0, max=2.0, step=0.05,
+               effect="top1 得分低于该值标 Unknown；与第二名接近（margin<0.3）会标 ambiguous", risk="low"),
             _p("method", "打分方式", "select", "zscore",
                options=[{"value": "zscore", "label": "z-score 均值"}, {"value": "ucell", "label": "UCell 秩和"}],
                risk="low", advanced=True),
@@ -153,6 +153,10 @@ STEPS = [
                effect="不足的簇改用全局模型", risk="low", advanced=True),
             _p("n_boot", "Bootstrap 次数（稳定性）", "number", 0, min=0, max=20, step=1,
                effect=">0 时额外估计边的稳定度，耗时线性增加", risk="low", advanced=True),
+            _p("tfs", "自定义源节点", "text", "",
+               effect="逗号分隔的基因名；留空=内置 TF 池。把非 TF 基因（如 FABP5、CD36）追加进来后它们也有出边，"
+                      "才能对非转录因子做有下游传播的虚拟敲低",
+               risk="low", advanced=True),
         ],
     },
     {
@@ -667,6 +671,10 @@ class Worker:
             "summary": result.get("summary"),
             "metrics": C.jsonable(result.get("metrics") or {}),
             "warnings": list(result.get("warnings") or [])[:20],
+            # 不可变溯源：step entry 必须记录本次 run id 与实际参数（含默认值展开），
+            # 下游 run 的 inputs.json.parentRuns 靠它绑定到不可变父 run。
+            "run": run["id"],
+            "params": C.jsonable(params),
         }
         meta.setdefault("steps", {})[step] = entry
         order = [item for item in (meta.get("stepOrder") or []) if item != step]
@@ -677,7 +685,8 @@ class Worker:
         self.save_state()
 
         finished = store.finish(run, status="ok", result=result, env=self._env_summary(),
-                                log=result.get("log") or "", inputs=self._inputs_of(dsid))
+                                log=result.get("log") or "",
+                                inputs=self._inputs_of(dsid, exclude_step=step))
         result["run"] = finished["id"]
         result["suggest"] = self._next_suggestion(dsid)
         return result
@@ -698,7 +707,12 @@ class Worker:
         return {"backend": info.get("backend"), "packages": info.get("packages"),
                 "pythonVersion": info.get("pythonVersion"), "seed": 0}
 
-    def _inputs_of(self, dsid: str) -> dict:
+    def _inputs_of(self, dsid: str, exclude_step: str | None = None) -> dict:
+        """本次 run 的输入指纹：stage npz 内容 sha256 + 上游不可变 run id。
+
+        `parentRuns` 让任何一次运行都能回溯到它消费的上游 run（params/result 均在
+        runs/run-XXXX/ 下，只增不改）；不含当前 step 自己。
+        """
         import vc_common as C
 
         out = {}
@@ -707,6 +721,15 @@ class Worker:
             path = os.path.join(stage_dir, f"{name}.npz")
             if os.path.exists(path):
                 out[name] = C.sha256_of(path)
+        meta = self._meta(dsid)
+        parent_runs = {}
+        for name, entry in (meta.get("steps") or {}).items():
+            if name == exclude_step:
+                continue
+            run_id = (entry or {}).get("run")
+            if run_id:
+                parent_runs[name] = str(run_id)
+        out["parentRuns"] = parent_runs
         return out
 
     def _dispatch_step(self, step: str, dsid: str, meta: dict, params: dict, run: dict) -> dict:
@@ -720,6 +743,24 @@ class Worker:
         if step == "state":
             module = self._require("vc_state")
             C.progress("构建状态空间…", 5)
+            # 把「质控」步骤的细胞/基因掩码传给状态表征（否则 QC 过滤对下游不生效）
+            try:
+                qc_stage = self._stage(dsid, "qc") if "qc" in (meta.get("stepOrder") or []) else None
+            except Exception:  # noqa: BLE001
+                qc_stage = None
+            if qc_stage:
+                arrays = qc_stage.get("arrays") or {}
+                cell_mask = arrays.get("cell_mask")
+                gene_mask = arrays.get("gene_mask")
+                if cell_mask is not None and "cell_mask" not in params:
+                    params = dict(params)
+                    params["cell_mask"] = np.asarray(cell_mask).astype(bool).tolist()
+                if gene_mask is not None and "gene_mask" not in params:
+                    params = dict(params)
+                    params["gene_mask"] = np.asarray(gene_mask).astype(bool).tolist()
+                kept = int(np.asarray(cell_mask).sum()) if cell_mask is not None else None
+                if kept is not None:
+                    C.progress(f"按质控掩码保留 {kept:,} 个细胞…", 8)
             result = module.run_state(bundle, params)
             result.setdefault("figures", [{"kind": "state_embedding", "title": "细胞状态空间"},
                                            {"kind": "cluster_bar", "title": "状态规模"}])
@@ -1851,40 +1892,92 @@ class Worker:
         return "\n".join(lines)
 
     def _script_text(self, meta: dict) -> str:
-        return f'''#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""复现脚本：{meta.get('name')} —— 由 dsh-virtualcell {VERSION} 生成。
+        """生成可复现脚本：参数取自**实际运行记录**（meta.steps[*].params），
+        并把 QC 的 cell_mask/gene_mask 传给 run_state（旧版用 _default_params，重跑会走错参数）。"""
+        order = [step for step in (meta.get("stepOrder") or [])]
+        steps = meta.get("steps") or {}
+        actual: dict[str, dict] = {}
+        for step in ("qc", "state", "annotate", "grn", "validate",
+                     "perturb", "screen", "response", "transition"):
+            entry = steps.get(step) or {}
+            params = entry.get("params") if isinstance(entry.get("params"), dict) else None
+            if params is None and step in order:
+                params = _default_params(step)
+            if params is not None:
+                actual[step] = params
 
-运行方式：
-    python3 reproduce.py            # 在插件 lib/ 目录旁运行
-注意：脚本读取工作目录里的已处理数据，不重新下载输入。
-"""
-
-import os
-import sys
-
-LIB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib")
-if LIB not in sys.path:
-    sys.path.insert(0, LIB)
-
-import vc_common as C
-import vc_io
-import vc_state
-import vc_grn
-
-WORKDIR = {self.workdir!r}
-DATASET = {meta.get('id')!r}
-
-bundle = vc_io.load_dataset(os.path.join(WORKDIR, "datasets", DATASET, "bundle.h5ad"), data_format="h5ad")
-qc = vc_state.run_qc(bundle, {_default_params("qc")!r})
-state = vc_state.run_state(bundle, {_default_params("state")!r})
-annotate = vc_state.run_annotate(bundle, state, {_default_params("annotate")!r})
-grn = vc_grn.run_grn(bundle, state, {_default_params("grn")!r})
-perturb = vc_grn.run_perturb(bundle, state, grn, {_default_params("perturb")!r})
-print("状态数：", state.get("n_clusters"))
-print("调控边：", (grn.get("metrics") or {{}}).get("n_edges"))
-print("扰动结论：", perturb.get("summary"))
-'''
+        lines = [
+            "#!/usr/bin/env python3",
+            "# -*- coding: utf-8 -*-",
+            f'"""复现脚本：{meta.get("name")} —— 由 dsh-virtualcell {VERSION} 生成。',
+            "",
+            "运行方式：",
+            "    python3 reproduce.py            # 在插件 lib/ 目录旁运行",
+            "注意：脚本读取工作目录里的已处理数据，不重新下载输入；",
+            "      参数取自本次实际运行记录（含默认值展开），不是模板默认值。",
+            '"""',
+            "",
+            "import os",
+            "import sys",
+            "",
+            "import numpy as np",
+            "",
+            'LIB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib")',
+            "if LIB not in sys.path:",
+            "    sys.path.insert(0, LIB)",
+            "",
+            "import vc_common as C",
+            "import vc_io",
+            "import vc_state",
+            "import vc_grn",
+            "",
+            f"WORKDIR = {self.workdir!r}",
+            f"DATASET = {meta.get('id')!r}",
+            "",
+            'bundle = vc_io.load_dataset(os.path.join(WORKDIR, "datasets", DATASET, "bundle.h5ad"),',
+            '                             data_format="h5ad")',
+        ]
+        if "qc" in actual:
+            lines += ["", f"QC_PARAMS = {actual['qc']!r}", "qc = vc_state.run_qc(bundle, QC_PARAMS)"]
+        if "state" in actual:
+            lines += ["", f"STATE_PARAMS = {actual['state']!r}"]
+            if "qc" in actual:
+                lines += [
+                    "state_params = dict(STATE_PARAMS)",
+                    "# 把 QC 掩码传给状态表征（与工作台一致；否则质控过滤对下游不生效）",
+                    'state_params["cell_mask"] = np.asarray(qc["arrays"]["cell_mask"]).astype(bool).tolist()',
+                    'state_params["gene_mask"] = np.asarray(qc["arrays"]["gene_mask"]).astype(bool).tolist()',
+                    "state = vc_state.run_state(bundle, state_params)",
+                ]
+            else:
+                lines += ["state = vc_state.run_state(bundle, STATE_PARAMS)"]
+        if "annotate" in actual:
+            lines += ["", f"ANNOTATE_PARAMS = {actual['annotate']!r}",
+                      "annotate = vc_state.run_annotate(bundle, state, ANNOTATE_PARAMS)"]
+        if "grn" in actual:
+            lines += ["", f"GRN_PARAMS = {actual['grn']!r}",
+                      "grn = vc_grn.run_grn(bundle, state, GRN_PARAMS)"]
+        if "validate" in actual:
+            lines += ["", f"VALIDATE_PARAMS = {actual['validate']!r}",
+                      "validate = vc_grn.run_validate(bundle, state, grn, VALIDATE_PARAMS)"]
+        if "perturb" in actual:
+            lines += ["", f"PERTURB_PARAMS = {actual['perturb']!r}",
+                      "perturb = vc_grn.run_perturb(bundle, state, grn, PERTURB_PARAMS)"]
+        if "screen" in actual:
+            lines += ["", f"SCREEN_PARAMS = {actual['screen']!r}",
+                      "screen = vc_grn.run_screen(bundle, state, grn, SCREEN_PARAMS)"]
+        if "transition" in actual:
+            lines += ["", f"TRANSITION_PARAMS = {actual['transition']!r}",
+                      "transition = vc_state.run_transition(bundle, state, TRANSITION_PARAMS)"]
+        lines += ["", "# ---- 关键结果（模型推演，不是实验结论）----"]
+        if "state" in actual:
+            lines.append('print("状态数：", state.get("n_clusters"), "轮廓系数：", '
+                         '(state.get("metrics") or {}).get("silhouette"))')
+        if "grn" in actual:
+            lines.append('print("调控边：", (grn.get("metrics") or {}).get("n_edges"))')
+        if "perturb" in actual:
+            lines.append('print("扰动结论（模型预测）：", perturb.get("summary"))')
+        return "\n".join(lines) + "\n"
 
     # -- 打开/示例/选择/关闭/重置 ----------------------------------------
     def open_dataset(self, args: dict) -> dict:
@@ -2191,6 +2284,10 @@ def main() -> int:
                 {"id": "matrix_text", "label": "表达矩阵 csv/tsv/txt", "ext": ".csv/.tsv/.txt(.gz)", "note": "方向自动判断，可强制转置"},
                 {"id": "geo_series", "label": "GEO series matrix", "ext": "_series_matrix.txt(.gz)", "note": "自动解析表段"},
                 {"id": "archive", "label": "压缩包", "ext": ".zip/.tar(.gz)", "note": "解包后自动找数据文件"},
+                {"id": "rds", "label": "R 单细胞对象 .rds", "ext": ".rds",
+                 "note": "Seurat v3–v5 / SingleCellExperiment / matrix；需要本机 Rscript + Seurat"},
+                {"id": "rdata", "label": "R 工作空间 .RData/.rda", "ext": ".RData/.rda",
+                 "note": "多对象时用 object 指定；obs 会保留"},
                 {"id": "url", "label": "URL 直链", "ext": "http(s)", "note": "下载后按格式识别，≤8 GB"},
             ], "attachKinds": ["perturb_table", "gene_set", "grn_prior", "drug_signature"],
                 "adapters": worker.engine_info()["adapters"]}

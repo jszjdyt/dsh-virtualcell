@@ -45,6 +45,32 @@ MAX_DOWNLOAD_BYTES = 8 * 1024 ** 3
 MAX_ARCHIVE_BYTES = 20 * 1024 ** 3
 MAX_ARCHIVE_ENTRIES = 400
 TEXT_EXT = (".csv", ".tsv", ".txt", ".tab", ".mtx", ".data")
+R_OBJ_EXT = (".rds", ".rdata", ".rda")
+R_BRIDGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vc_rbridge.R")
+
+
+def _find_rscript():
+    """探测 Rscript：PATH → 环境变量 → macOS 框架版 → 常见安装位置。"""
+    import shutil
+
+    candidates = []
+    env = os.environ.get("DSH_VIRTUALCELL_RSCRIPT") or os.environ.get("DSH_VC_RSCRIPT")
+    if env:
+        candidates.append(env)
+    found = shutil.which("Rscript")
+    if found:
+        candidates.append(found)
+    candidates.extend([
+        "/Library/Frameworks/R.framework/Resources/bin/Rscript",
+        "/usr/local/bin/Rscript",
+        "/opt/homebrew/bin/Rscript",
+        "/usr/bin/Rscript",
+        r"C:\Program Files\R\R-4.4.2\bin\Rscript.exe",
+    ])
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
 ARCHIVE_EXT = (".zip", ".tar", ".gz", ".tgz", ".bz2", ".tar.gz")
 
 
@@ -209,6 +235,10 @@ def sniff(path: str, *, data_format: str = "auto", member=None, transpose: bool 
     if _is_archive(lower) and not lower.endswith(".mtx.gz"):
         return {"format": "archive", "path": target, "member": member, "notes": []}
 
+    if any(lower.endswith(ext) for ext in R_OBJ_EXT):
+        return {"format": "rdata" if lower.endswith((".rdata", ".rda")) else "rds",
+                "path": target, "member": None,
+                "notes": ["R 对象（Seurat / SingleCellExperiment / matrix），需要本机 Rscript + Seurat"]}
     if lower.endswith((".h5ad", ".h5ad.gz")):
         return {"format": "h5ad", "path": target, "member": None, "notes": []}
     if lower.endswith(".loom"):
@@ -248,7 +278,29 @@ def _is_data_file(path: str) -> bool:
 # 各格式读取
 # ---------------------------------------------------------------------------
 
-def _read_h5ad(path: str) -> Bundle:
+def _h5ad_counts_layer(adata) -> str | None:
+    """在 adata.layers 里找原始 counts 层（名字像 counts 的优先，其次整数型层）。"""
+    try:
+        keys = [str(key) for key in adata.layers.keys()]
+    except Exception:  # noqa: BLE001
+        return None
+    preferred = ("counts", "count", "raw_counts", "umi_counts", "counts_raw", "raw")
+    for key in keys:
+        if key.lower() in preferred:
+            return key
+    for key in keys:
+        if key.lower().startswith("count"):
+            return key
+    return None
+
+
+def _read_h5ad(path: str, *, layer: str | None = None) -> Bundle:
+    """读 h5ad：按 layers['counts'] → X → raw.X 选层，并记录 matrix_source / value_type。
+
+    CONTRACT §5 说「自动取 X / raw.X」，但真实 AnnData 里 X 往往是 scale/归一化后的
+    矩阵、raw 或 layers['counts'] 才是 counts。旧实现固定取 .X 只靠启发式猜类型，
+    会把归一化值当 counts 送进 QC/state。这里明确选层并写 meta，供下游判断。
+    """
     import anndata as ad
     import pandas as pd
 
@@ -256,15 +308,65 @@ def _read_h5ad(path: str) -> Bundle:
         adata = ad.read_h5ad(path)
     except Exception as error:  # noqa: BLE001
         raise C.err("bad_request", f"h5ad 读取失败：{error}") from error
-    matrix = adata.X
+
+    layer_keys = []
+    try:
+        layer_keys = [str(key) for key in adata.layers.keys()]
+    except Exception:  # noqa: BLE001
+        layer_keys = []
+    matrix = None
+    matrix_source = None
+    var_names = list(adata.var_names)
+
+    if layer:
+        if layer not in layer_keys:
+            raise C.err("bad_request", f"h5ad 没有 layers[{layer!r}]",
+                        available=layer_keys[:20])
+        matrix = adata.layers[layer]
+        matrix_source = f"layers/{layer}"
+    else:
+        counts_key = _h5ad_counts_layer(adata)
+        if counts_key is not None:
+            matrix = adata.layers[counts_key]
+            matrix_source = f"layers/{counts_key}"
+    if matrix is None and adata.X is not None:
+        x_type = _value_type(adata.X)
+        if x_type == "scaled" and adata.raw is not None and adata.raw.X is not None:
+            # X 是中心化/标度化数据：不能当表达用，退回 raw（通常是 lognorm / counts）
+            matrix = adata.raw.X
+            matrix_source = "raw/X"
+            try:
+                var_names = list(adata.raw.var_names)
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            matrix = adata.X
+            matrix_source = "X"
+    if matrix is None and adata.raw is not None and adata.raw.X is not None:
+        matrix = adata.raw.X
+        matrix_source = "raw/X"
+        try:
+            var_names = list(adata.raw.var_names)
+        except Exception:  # noqa: BLE001
+            pass
     if matrix is None:
-        raise C.err("bad_request", "h5ad 里没有 X 矩阵")
+        raise C.err("bad_request", "h5ad 里没有 X 矩阵，也没有 layers['counts'] 或 raw",
+                    layers=layer_keys[:20])
+
     X = _to_csr(matrix)
-    genes = _squeeze_names(list(adata.var_names), "GENE", X.shape[1])
+    value_type = None
+    if matrix_source and matrix_source.startswith("layers/"):
+        value_type = "counts" if "count" in matrix_source.lower() else _value_type(matrix)
+    elif matrix_source == "raw/X":
+        value_type = _value_type(matrix)
+    else:
+        value_type = _value_type(matrix)
+    genes = _squeeze_names(var_names, "GENE", X.shape[1])
     cells = _squeeze_names(list(adata.obs_names), "CELL", X.shape[0])
     obs = adata.obs.copy()
     obs.index = cells
-    meta = {"format": "h5ad", "source": path, "value_type": _value_type(X), "transpose": False,
+    meta = {"format": "h5ad", "source": path, "value_type": value_type, "transpose": False,
+            "matrix_source": matrix_source, "h5ad_layers": layer_keys,
             "obs_columns": [str(c) for c in obs.columns]}
     return Bundle(X=X, genes=genes, cells=cells, obs=obs, meta=meta)
 
@@ -361,6 +463,116 @@ def _empty_obs(count: int):
     import pandas as pd
 
     return pd.DataFrame(index=[f"cell-{index}" for index in range(count)])
+
+
+def _read_r_object(path: str, *, object: str | None = None, inspect_only: bool = False,
+                   cache_dir: str | None = None) -> dict:
+    """用 Rscript + vc_rbridge.R 读 .rds/.RData/.rda，返回中立文件目录与 meta。
+
+    R 端负责对象挑选（Seurat v3/v4/v5 / SingleCellExperiment / matrix / data.frame），
+    多对象时返回 status='ambiguous' + candidates，这里转成 EngineError('ambiguous')。
+    """
+    import json
+    import subprocess
+
+    rscript = _find_rscript()
+    if not rscript:
+        raise C.err("no_r", "没有找到 Rscript，无法直接读 .rds/.RData",
+                    hint="安装 R（含 Seurat/SeuratObject/SingleCellExperiment），"
+                         "或先用单细胞工作台把对象导出成 h5ad 再导入；"
+                         "也可设置环境变量 DSH_VIRTUALCELL_RSCRIPT")
+    if not os.path.isfile(R_BRIDGE):
+        raise C.err("internal", f"R bridge 脚本缺失：{R_BRIDGE}")
+    base = C.ensure_dir(cache_dir or tempfile.mkdtemp(prefix="vc-r-"))
+    out_dir = C.ensure_dir(os.path.join(base, f"rbridge-{int(time.time() * 1000)}"))
+    command = [rscript, "--vanilla", R_BRIDGE, "--in", os.path.abspath(path), "--out", out_dir]
+    if object:
+        command.extend(["--object", str(object)])
+    if inspect_only:
+        command.append("--inspect")
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, encoding="utf-8",
+                                   errors="replace", timeout=900)
+    except subprocess.TimeoutExpired as error:
+        raise C.err("timeout", f"R 读取超时（>{900}s），对象可能过大") from error
+    except OSError as error:
+        raise C.err("no_r", f"无法调用 Rscript：{error}") from error
+    meta = {}
+    meta_path = os.path.join(out_dir, "meta.json")
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as handle:
+                meta = json.load(handle)
+        except (OSError, ValueError):
+            meta = {}
+    status = str(meta.get("status") or ("ok" if completed.returncode == 0 else "error"))
+    if status == "ambiguous":
+        candidates = meta.get("candidates") or []
+        raise C.err("ambiguous", "R 文件里有多个可用的单细胞对象，请用 object 参数指定",
+                    candidates=candidates,
+                    hint="candidates 里的 object 字段就是 object 参数要填的值；也可在单细胞工作台里先另存成 h5ad")
+    if status != "ok" or completed.returncode != 0:
+        detail = (meta.get("error") or completed.stderr or completed.stdout or "").strip()
+        code = "unsupported" if "不支持" in detail or "无法识别" in detail else "bad_request"
+        raise C.err(code, f"R 对象读取失败：{detail[-1500:] or '未知错误'}",
+                    stderr=(completed.stderr or "")[-2000:])
+    return {"out": out_dir, "meta": meta, "bridgeStdout": (completed.stdout or "")[-2000:]}
+
+
+def _bundle_from_r_bridge(result: dict, original_path: str) -> Bundle:
+    import json
+
+    import pandas as pd
+    from scipy.io import mmread
+
+    out_dir = result["out"]
+    meta = result.get("meta") or {}
+    matrix_path = os.path.join(out_dir, "matrix.mtx")
+    if not os.path.exists(matrix_path):
+        raise C.err("bad_request", "R 桥没有输出矩阵文件")
+    matrix = mmread(matrix_path)
+    matrix = sp.csr_matrix(matrix) if sp.issparse(matrix) else sp.csr_matrix(np.asarray(matrix))
+    orientation = str(meta.get("orientation") or "cells_genes")
+    if orientation != "cells_genes":
+        matrix = sp.csr_matrix(matrix.T)
+    genes = []
+    features_path = os.path.join(out_dir, "features.tsv")
+    if os.path.exists(features_path):
+        with open(features_path, "r", encoding="utf-8", errors="replace") as handle:
+            genes = [line.rstrip("\n") for line in handle if line.strip()]
+    cells = []
+    barcodes_path = os.path.join(out_dir, "barcodes.tsv")
+    if os.path.exists(barcodes_path):
+        with open(barcodes_path, "r", encoding="utf-8", errors="replace") as handle:
+            cells = [line.rstrip("\n") for line in handle if line.strip()]
+    obs = _empty_obs(matrix.shape[0])
+    obs_path = os.path.join(out_dir, "obs.csv")
+    if os.path.exists(obs_path):
+        try:
+            obs = pd.read_csv(obs_path, index_col=0)
+        except Exception:  # noqa: BLE001
+            obs = _empty_obs(matrix.shape[0])
+    X = _to_csr(matrix)
+    # R 端显式给出 value_type（counts / lognorm）；旧版桥没有该字段时才按矩阵启发式判断，
+    # 不能把 has_counts 的默认值当真相（scale.data 曾被当成 lognorm 导出）。
+    bridge_value_type = str(meta.get("value_type") or "").lower()
+    if bridge_value_type not in ("counts", "lognorm", "scaled"):
+        bridge_value_type = None
+    layer_used = str(meta.get("layer_used") or "")
+    meta_out = {
+        "format": "rdata" if str(path_lower := original_path.lower()).endswith((".rdata", ".rda")) else "rds",
+        "source": original_path, "value_type": bridge_value_type,
+        "matrix_source": f"r/{layer_used}" if layer_used else "r",
+        "transpose": False, "obs_columns": [str(c) for c in obs.columns],
+        "r_class": meta.get("class"), "r_assay": meta.get("assay"), "r_layers": meta.get("layers"),
+        "r_layer_used": layer_used or None,
+        "r_object": (meta.get("selected") or {}).get("name") if isinstance(meta.get("selected"), dict) else None,
+    }
+    warnings = [str(item) for item in (meta.get("warnings") or [])]
+    if warnings:
+        meta_out["warnings"] = warnings
+    return Bundle(X=X, genes=_squeeze_names(genes, "GENE", X.shape[1]),
+                  cells=_squeeze_names(cells, "CELL", X.shape[0]), obs=obs, meta=meta_out)
 
 
 def _read_loom(path: str) -> Bundle:
@@ -589,12 +801,34 @@ def inspect_path(path: str, *, data_format: str = "auto", member=None, transpose
             genes = [str(item) for item in adata.var_names[:20]]
             cells = [str(item) for item in adata.obs_names[:10]]
             obs_cols = [str(item) for item in adata.obs.columns]
-            try:
-                value_type = _value_type(adata.X)
-            except Exception:  # noqa: BLE001
-                value_type = "unknown"
+            available_layers = [str(key) for key in getattr(adata, "layers", {})]
+            counts_key = _h5ad_counts_layer(adata)
+            matrix_source = "X"
+            value_type = "unknown"
+            if counts_key is not None:
+                matrix_source = f"layers/{counts_key}"
+                value_type = "counts" if "count" in counts_key.lower() else "unknown"
+            elif adata.X is not None:
+                try:
+                    value_type = _value_type(adata.X)
+                except Exception:  # noqa: BLE001
+                    value_type = "unknown"
+                if value_type == "scaled" and adata.raw is not None:
+                    matrix_source = "raw/X"
+                    try:
+                        value_type = _value_type(adata.raw.X)
+                    except Exception:  # noqa: BLE001
+                        value_type = "unknown"
+            elif adata.raw is not None:
+                matrix_source = "raw/X"
+                try:
+                    value_type = _value_type(adata.raw.X)
+                except Exception:  # noqa: BLE001
+                    value_type = "unknown"
             detail.update({"n_cells": int(shape[0]), "n_genes": int(shape[1]),
-                           "value_type": value_type, "sample_genes": genes, "sample_cells": cells,
+                           "value_type": value_type, "matrix_source": matrix_source,
+                           "available_layers": available_layers[:20],
+                           "sample_genes": genes, "sample_cells": cells,
                            "obs_columns": obs_cols})
         elif fmt == "10x_h5":
             import h5py
@@ -617,6 +851,20 @@ def inspect_path(path: str, *, data_format: str = "auto", member=None, transpose
                 shape = tuple(int(v) for v in handle["matrix"].shape)
             detail.update({"n_cells": max(shape), "n_genes": min(shape), "value_type": "unknown",
                            "obs_columns": []})
+        elif fmt in ("rds", "rdata"):
+            bridged = _read_r_object(source, object=object, inspect_only=True, cache_dir=cache_dir)
+            meta = bridged.get("meta") or {}
+            dim = meta.get("dim") or [None, None]
+            detail.update({
+                "n_cells": dim[0] if len(dim) > 0 else None,
+                "n_genes": dim[1] if len(dim) > 1 else None,
+                "value_type": str(meta.get("value_type") or
+                                   ("counts" if meta.get("has_counts", True) else "lognorm")),
+                "matrix_source": f"r/{meta.get('layer_used') or ''}".rstrip("/"),
+                "r_class": meta.get("class"), "r_assay": meta.get("assay"),
+                "r_layers": meta.get("layers"), "obs_columns": [],
+                "notes": notes + ["R 对象预览：正式导入才会导出矩阵"],
+            })
         elif fmt == "geo_series":
             bundle = _read_geo_series(source)
             detail.update({"n_cells": bundle.n_cells, "n_genes": bundle.n_genes,
@@ -675,6 +923,9 @@ def load_dataset(path: str, *, data_format: str = "auto", member=None, transpose
         bundle = starters[fmt](source)
     elif fmt == "matrix_text":
         bundle = _read_text(source, transpose=transpose, gene_col=gene_col)
+    elif fmt in ("rds", "rdata"):
+        bridged = _read_r_object(source, object=object, cache_dir=cache_dir)
+        bundle = _bundle_from_r_bridge(bridged, source)
     else:
         raise C.err("unsupported", f"不支持的格式：{fmt}")
     bundle.meta.setdefault("format", fmt)

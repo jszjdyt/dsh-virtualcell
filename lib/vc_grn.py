@@ -79,15 +79,36 @@ def _stage_arrays(state: dict) -> dict:
         raise C.err("prerequisite", "state.genes 与 X_log 的列数不一致",
                     hint="检查 state 结果是否完整（引擎应回放 genes 字段）")
     pos = {gene: index for index, gene in enumerate(genes)}
-    hvg = [str(g) for g in (state.get("hvg") or genes)]
-    hvg = [g for g in dict.fromkeys(hvg) if g in pos] or list(genes)
+    hvg_raw = list(dict.fromkeys(str(g) for g in (state.get("hvg") or genes)))
+    raw_std = state.get("hvg_std", arrays.get("hvg_std"))
+    raw_mean = state.get("hvg_mean", arrays.get("hvg_mean"))
+    try:
+        raw_std = (np.asarray(raw_std, dtype=np.float64).ravel()
+                   if raw_std is not None else None)
+    except (TypeError, ValueError):  # noqa: BLE001
+        raw_std = None
+    try:
+        raw_mean = (np.asarray(raw_mean, dtype=np.float64).ravel()
+                    if raw_mean is not None else None)
+    except (TypeError, ValueError):  # noqa: BLE001
+        raw_mean = None
+    hvg = [g for g in hvg_raw if g in pos] or list(genes)
     hvg_idx = np.array([pos[g] for g in hvg], dtype=np.int64)
+    hvg_std = None
+    hvg_mean = None
+    if raw_std is not None and raw_std.size == len(hvg_raw):
+        std_map = dict(zip(hvg_raw, raw_std))
+        hvg_std = np.array([float(std_map.get(g, 1.0)) for g in hvg], dtype=np.float64)
+    if raw_mean is not None and raw_mean.size == len(hvg_raw):
+        mean_map = dict(zip(hvg_raw, raw_mean))
+        hvg_mean = np.array([float(mean_map.get(g, 0.0)) for g in hvg], dtype=np.float64)
     latent = arrays.get("latent")
     latent = None if latent is None else np.asarray(latent, dtype=np.float32)
     cluster_ids, cluster_names = _cluster_of(
         arrays.get("clusters"), state.get("cluster_labels"), int(X.shape[0]))
     return {
         "X": X, "genes": genes, "gene_pos": pos, "hvg": hvg, "hvg_idx": hvg_idx,
+        "hvg_std": hvg_std, "hvg_mean": hvg_mean,
         "latent": latent, "cluster_ids": cluster_ids, "cluster_names": cluster_names,
         "n_cells": int(X.shape[0]), "n_genes": int(X.shape[1]), "k": len(cluster_names),
     }
@@ -875,8 +896,21 @@ def _simulate(state, data, grn, gene, mode: str = "knockout", strength: float = 
     row_pos = np.array([r for r, g in enumerate(row_gene) if int(g) in local_of], dtype=np.int64)
     row_loc = np.array([local_of[int(row_gene[r])] for r in row_pos], dtype=np.int64)
     delta_latent = np.zeros((k, n_pcs), dtype=np.float32)
+    hvg_std = data.get("hvg_std")
+    projection_scaled = False
     if row_pos.size:
-        delta_latent = (means_active[:, row_loc] @ loadings[row_pos, :]).astype(np.float32)
+        values = np.asarray(means_active[:, row_loc], dtype=np.float64)
+        if hvg_std is not None and np.asarray(hvg_std).size == hvg_global.size:
+            # PCA 拟合在 z-score(HVG) 上；Δ 是 log 空间，必须除以同一 std 再投影。
+            std_map = {int(g): float(v) for g, v in zip(hvg_global, np.asarray(hvg_std).ravel())}
+            scale = np.array([std_map.get(int(row_gene[r]), 1.0) for r in row_pos],
+                             dtype=np.float64)
+            values = values / np.maximum(scale.reshape(1, -1), 1e-8)
+            projection_scaled = True
+        delta_latent = (values @ loadings[row_pos, :]).astype(np.float32)
+    if hvg_std is None:
+        warnings.append("state 未提供 hvg_std（旧版 state）：扰动 Δ 投影未做 z-score 尺度校正；"
+                        "建议重跑「状态表征」以获得正确量纲")
     arrows = None
     if emb is not None:
         arrows = (delta_latent @ emb).astype(np.float32)
@@ -923,6 +957,10 @@ def _simulate(state, data, grn, gene, mode: str = "knockout", strength: float = 
         "target_state": names[int(target_of[source_index])],
         "cluster_weights": weights, "n_active": m, "warnings": warnings,
         "used_cells": bool(use_cells), "n_prop": rounds, "strength": float(strength),
+        "projection": {
+            "space": "zscore_hvg" if projection_scaled else "log_expression",
+            "scaled": bool(projection_scaled),
+        },
     }
 
 
@@ -1270,13 +1308,15 @@ def run_validate(bundle, state, grn, params: dict | None = None) -> dict:
     rows_keep = [i for i, g in enumerate(grn_tf_all) if g in pos]
     cols_keep = [j for j, g in enumerate(grn_tg_all) if g in pos]
     score = np.zeros((n_tf, n_tg), dtype=np.float32)
-    sign = np.zeros((n_tf, n_tg), dtype=np.int8)
+    # 强度取 |coef| 的最大值用于边存在性；符号必须来自**带符号**的原始系数，
+    # 不能从 |coef| 反推（否则 sign() 恒为 +1，符号一致率退化成"真值正边占比"）。
+    signed_score = np.zeros((n_tf, n_tg), dtype=np.float32)
     for ci in range(data["k"]):
         block = _coef_for_cluster(grn, ci, n_tf=len(grn_tf_all), n_tg=len(grn_tg_all))
         sub = np.asarray(block[np.ix_(rows_keep, cols_keep)], dtype=np.float32)
         better = np.abs(sub) > np.abs(score)
         score = np.where(better, np.abs(sub), score).astype(np.float32)
-        sign = np.where(better, np.sign(sub).astype(np.int8), sign).astype(np.int8)
+        signed_score = np.where(better, sub, signed_score).astype(np.float32)
 
     # ---- 边存在性：推断边 vs 真值边 ----
     tf_pos = {g: i for i, g in enumerate(tf_names)}
@@ -1324,14 +1364,37 @@ def run_validate(bundle, state, grn, params: dict | None = None) -> dict:
     top_k = min(100, eval_score.size)
     order_top = np.argsort(-eval_score)[:top_k]
     top_hits = float(eval_label[order_top].mean()) if top_k else 0.0
-    pos_mask = flat_label.astype(bool) & (flat_score > 0)
+    # 符号一致率：只在「推断边与真值边都存在」的对上比较，用带符号系数。
+    pos_mask = flat_label.astype(bool) & (signed_score.ravel() != 0)
     sign_agreement = None
+    sign_agreement_breakdown = {"n_positive_truth": 0, "n_negative_truth": 0,
+                                "positive_agreement": None, "negative_agreement": None}
     if pos_mask.sum():
-        inferred_sign = np.sign(flat_score[pos_mask]).astype(np.int8)
+        inferred_sign = np.sign(signed_score.ravel()[pos_mask]).astype(np.int8)
         true_sign = truth_sign.ravel()[pos_mask]
         usable = true_sign != 0
         if usable.any():
-            sign_agreement = float((inferred_sign[usable] == true_sign[usable]).mean())
+            agrees = inferred_sign[usable] == true_sign[usable]
+            sign_agreement = float(agrees.mean())
+            # 正边 / 负边各自的一致率 + 基线：全部猜成 +1 时的期望一致率 = 真值正边占比，
+            # 只有显著高于该基线才说明符号信息真的被恢复。
+            picked_sign = inferred_sign[usable]
+            picked_truth = true_sign[usable]
+            pos_sel = picked_truth > 0
+            neg_sel = picked_truth < 0
+            sign_agreement_breakdown = {
+                "n_positive_truth": int(pos_sel.sum()),
+                "n_negative_truth": int(neg_sel.sum()),
+                "positive_agreement": (float(agrees[pos_sel].mean()) if pos_sel.any() else None),
+                "negative_agreement": (float(agrees[neg_sel].mean()) if neg_sel.any() else None),
+            }
+            baseline_agreement = float(pos_sel.mean())  # 恒猜 +1 的期望一致率
+            sign_agreement_breakdown["always_positive_baseline"] = baseline_agreement
+            if sign_agreement <= baseline_agreement + 1e-9:
+                warnings.append(
+                    f"符号一致率 {sign_agreement:.4f} 未高于「恒猜 +1」基线 {baseline_agreement:.4f}："
+                    "当前系数矩阵没有可用的符号信息，不要据此声称调控方向"
+                )
 
     # ---- 留出扰动 Δ：同一 _simulate 模拟 vs 真值 ----
     truth_pert = truth.get("perturb") or {}
@@ -1396,6 +1459,11 @@ def run_validate(bundle, state, grn, params: dict | None = None) -> dict:
         "delta_spearman_all_mean": _mean(spearman_all),
         "n_truth_edges": int(flat_label.sum()), "n_pairs": int(flat_label.size),
         "runtime_s": C.fnum(time.time() - t0, 2), "sign_agreement": C.fnum(sign_agreement),
+        "sign_agreement_positive": C.fnum(sign_agreement_breakdown.get("positive_agreement")),
+        "sign_agreement_negative": C.fnum(sign_agreement_breakdown.get("negative_agreement")),
+        "sign_agreement_n_positive": int(sign_agreement_breakdown.get("n_positive_truth") or 0),
+        "sign_agreement_n_negative": int(sign_agreement_breakdown.get("n_negative_truth") or 0),
+        "sign_agreement_baseline": C.fnum(sign_agreement_breakdown.get("always_positive_baseline")),
     }
     passed = bool(auroc is not None and auroc >= 0.65
                   and metrics["delta_spearman_mean"] is not None
@@ -1429,7 +1497,11 @@ def run_validate(bundle, state, grn, params: dict | None = None) -> dict:
              {"metric": "top100_precision", "value": metrics["grn_top100_precision"],
               "detail": "推断 top100 边里真值边比例"},
              {"metric": "sign_agreement", "value": metrics["sign_agreement"],
-              "detail": "推断边与真值边符号一致率"},
+              "detail": f"推断边与真值边符号一致率（用带符号系数比对；正边 {metrics['sign_agreement_n_positive']} 条"
+                        f"={metrics['sign_agreement_positive']}，负边 {metrics['sign_agreement_n_negative']} 条"
+                        f"={metrics['sign_agreement_negative']}）"},
+             {"metric": "sign_agreement_baseline", "value": metrics["sign_agreement_baseline"],
+              "detail": "「恒猜 +1」的期望一致率（真值正边占比）；符号信息无用时一致率会等于它"},
              {"metric": "n_truth_edges", "value": n_truth_in_universe, "detail": "落在候选空间的真值边"},
              {"metric": "n_pairs", "value": int(flat_label.size), "detail": "候选空间 TF×target 对数"},
          ]},

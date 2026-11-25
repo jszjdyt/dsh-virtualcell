@@ -12,6 +12,12 @@ python3 -c "import numpy, pandas, scipy, sklearn, anndata, h5py, matplotlib; pri
 python3 -m pip install -r requirements.txt      # 在插件目录执行
 ```
 
+**R（可选，只有要直接读 `.rds/.RData` 时才需要）**：
+
+```bash
+Rscript -e 'for (p in c("Seurat","SeuratObject","SingleCellExperiment","Matrix")) cat(p, requireNamespace(p, quietly=TRUE), "\n")'
+```
+
 可选增强（不装也能用，只是降级）：`scanpy`（Leiden/UMAP）、`scvi-tools`、`celloracle`、`gears`，
 以及基础模型 `scgpt / geneformer / arc-state`（需另下权重）。工作台会在「引擎徽章」里如实显示装了什么。
 

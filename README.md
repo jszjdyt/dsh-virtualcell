@@ -29,7 +29,7 @@
 
 | 模块 | 内容 |
 |---|---|
-| **输入** | `.h5ad`、10x `.h5`、10x mtx 三件套、Loom、文本矩阵 csv/tsv/txt（可 gz，方向自动判断）、GEO series matrix、zip/tar 压缩包、URL；另可挂载扰动表 / 基因集 / GRN 先验 / 药物签名 |
+| **输入** | `.h5ad`、10x `.h5`、10x mtx 三件套、Loom、文本矩阵 csv/tsv/txt（可 gz，方向自动判断）、GEO series matrix、zip/tar 压缩包、URL、**R 的 `.rds`/`.RData`（Seurat / SingleCellExperiment，obs 保留）**；另可挂载扰动表 / 基因集 / GRN 先验 / 药物签名 |
 | **质控** | 每细胞检出基因数 / 总 counts / 线粒体占比；可过滤细胞与低表达基因（掩码保留，可回溯） |
 | **状态表征** | 归一化 + log1p → HVG（seurat 风格）→ PCA → kNN 图 → 聚类（自动扫 k / 指定 k；有 scanpy 则 Leiden）→ 2D 嵌入（t-SNE/UMAP/PCA）→ 每簇 marker |
 | **状态注释** | 内置 20 类细胞状态参考 marker 面板，z-score / UCell 秩和打分，输出 top1/top2 + margin + 证据基因 |
@@ -55,6 +55,19 @@ python3 -c "import numpy, pandas, scipy, sklearn, anndata, h5py, matplotlib; pri
 在 Harness 里：**设置 → 插件 → 安装本地插件包**，选择本目录；或让 Agent 调
 `plugin_manager action=install_bundle target=<本目录绝对路径>`。重载页面后侧边栏出现「虚拟细胞」，对话里出现 `virtualcell` 工具。
 详见 [INSTALL.md](INSTALL.md)。
+
+## 需要什么数据？从哪下？
+
+**最小只要一个「细胞 × 基因」表达矩阵**（h5ad / 10x h5 / 10x mtx 三件套 / loom / csv-tsv / GEO series matrix / zip / URL / **R 的 .rds/.RData** 都行；
+基因名要能对上基因符号）。想更可信再补三样：细胞注释、ATAC/GRN 先验、Perturb-seq 扰动表。
+
+完整清单、各渠道下载方法（10x 官网 / GEO / CELLxGENE / HCA / Replogle Perturb-seq）、已验证直链和常见坑，
+见 **[DATA_GUIDE.md](DATA_GUIDE.md)**。
+
+真实数据实测（10x PBMC 3k，7.3 MB）：2,699 细胞 × 13,714 基因 → 5 个状态（轮廓系数 0.35）→
+注释 **T 54% / Mono 25% / B 13% / NK 7% / Platelet 0.5%**（与已知组成一致），GRN hub 为 SPI1/JUNB/CEBPD/ID2/CEBPB。
+
+![真实数据 PBMC3k 状态图](examples/real-pbmc3k-state.png)
 
 ## 快速上手（3 步）
 
@@ -137,7 +150,9 @@ dsh-virtualcell/
 ├─ lib/vc_response.py    # 扰动响应预测 + 签名投影
 ├─ lib/vc_plot.py        # 16 种出版级出图
 ├─ lib/vc_priors.py      # 参考 marker / TF 列表 / 通路基因集
+├─ lib/vc_rbridge.R      # R 桥：.rds/.RData → 中立文件（Seurat/SCE/matrix）
 ├─ test/                 # node 单测 + 各模块自测 + 端到端冒烟测试
+├─ DATA_GUIDE.md         # 要什么数据、从哪下、怎么导入、常见坑
 ├─ CONTRACT.md           # 工程契约（路由/JSON/Python 签名）
 └─ DESIGN.md             # 设计说明与算法
 ```
@@ -151,6 +166,7 @@ python3 test/test_io.py          # 输入解析 + demo 确定性
 python3 test/test_state.py       # 状态表征 / 注释 / 转移
 python3 test/test_grn.py         # GRN / 校验 / 扰动 / 筛选（合成真值 AUROC>0.9）
 python3 test/test_plot.py        # 16 种图 + 降级路径
+python3 test/test_r_object.py   # R 对象导入（.rds/.RData/多对象歧义；缺 R 自动 SKIP）
 python3 test/smoke_e2e.py        # 端到端 42 项断言（含 worker 重启恢复）
 ```
 

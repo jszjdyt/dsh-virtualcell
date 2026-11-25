@@ -47,7 +47,8 @@
 --------
 * 有效扰动数 < 5：warning「不足以训练，仅给描述性结果」，method 降级为
   ``mean_shift``（LOO 均值基线），不再训练线性模型。
-* 无 control 行：用全表总均值当伪 control，warning。
+* 无 control 行：抛 ``prerequisite``（拒绝用全表均值当伪 control；Δ 需要真实对照）。
+* 交叉验证：特征标准化在训练折内拟合；表里有 donor/sample 列时按组留出。
 * ``table is None``：若 ``params['signature']`` 存在 → 自动转 ``project_signature``
   （``metrics['mode']='signature_projection'``）；否则抛 ``prerequisite``，
   details 说明"需先 attach kind=perturb_table 或 drug_signature"。
@@ -125,6 +126,13 @@ _PERT_KEYS = (
     "perturbation_name", "target", "target_gene", "guide_gene", "sgrna_gene",
 )
 _GENE_KEYS = ("gene", "gene_symbol", "gene_name", "symbol", "genes")
+#: donor / 样本 / 批次列别名：response 的交叉验证必须按这些组做留出，避免同一供体的
+#: 扰动被同时放进训练折与测试折（同源泄漏）。
+_DONOR_KEYS = (
+    "donor", "donor_id", "donorid", "sample", "sample_id", "sampleid",
+    "patient", "patient_id", "patientid", "subject", "subject_id",
+    "replicate", "rep", "batch", "library", "lane", "individual",
+)
 _VALUE_KEYS = (
     "value", "expr", "expression", "mean_expr", "mean_expression", "lognorm",
     "logfc", "log2fc", "lfc", "score", "delta", "effect",
@@ -341,7 +349,24 @@ def _load_latent_frame(state, genes: list[str], latent_dim: int, warnings: list[
                 f"latent_dim={int(latent_dim)} 超过 state 的 PC 数({n_latent})，按 {n_latent} 处理"
             )
         n_latent = min(int(latent_dim), n_latent)
-    return loadings[:, :n_latent], hvg, np.asarray(hvg_bundle_idx, int), np.asarray(hvg_rows, int), n_latent
+
+    # PCA 是在 z-score 后的 HVG 上拟合的；Δ_gene 在 log 空间，投影前要除以同一 std。
+    raw_std = _state_get(state, "hvg_std")
+    hvg_scale = None
+    if raw_std is not None:
+        try:
+            scale = np.asarray(raw_std, dtype=float).ravel()
+        except (TypeError, ValueError):  # noqa: BLE001
+            scale = None
+        if scale is not None and scale.size == n_rows and np.all(np.isfinite(scale)):
+            hvg_scale = np.maximum(scale, 1e-8)
+        else:
+            warnings.append("state 的 hvg_std 形状/数值非法，已忽略标准化校正（Δ 投影量纲可能不一致）")
+    else:
+        warnings.append("state 未提供 hvg_std（旧版 state）：Δ 投影未做 z-score 尺度校正；"
+                        "建议重跑「状态表征」以获得正确量纲")
+    return (loadings[:, :n_latent], hvg, np.asarray(hvg_bundle_idx, int),
+            np.asarray(hvg_rows, int), n_latent, hvg_scale)
 
 
 def _centroids_and_labels(state, n_latent: int, warnings: list[str]):
@@ -448,6 +473,7 @@ def _prepare_table(table) -> tuple[pd.DataFrame, dict]:
     gene_col = _find_column(frame.columns, _GENE_KEYS)
     value_col = _find_column(frame.columns, _VALUE_KEYS)
     cell_col = _find_column(frame.columns, _CELL_KEYS)
+    donor_col = _find_column(frame.columns, _DONOR_KEYS)
 
     is_long = (
         pert_col is not None
@@ -472,9 +498,15 @@ def _prepare_table(table) -> tuple[pd.DataFrame, dict]:
         wide = (work.groupby([pert_col, gene_col], sort=False)[value_col]
                 .mean().unstack())
         wide.index = wide.index.astype(str).str.strip()
+        if donor_col is not None and str(donor_col) in frame.columns:
+            donor_of = (frame.dropna(subset=[pert_col])
+                        .groupby(pert_col)[donor_col]
+                        .agg(lambda values: sorted({str(v).strip() for v in values})[0]))
+            wide["__donor__"] = wide.index.map(
+                lambda key: donor_of.get(key, donor_of.get(str(key).strip(), "")))
         wide = wide.reset_index()
         wide = wide.rename(columns={pert_col: "__pert__"})
-        gene_cols = [c for c in wide.columns if c != "__pert__"]
+        gene_cols = [c for c in wide.columns if c not in ("__pert__", "__donor__")]
         n_gene_cols = max(1, len(gene_cols))
         counts = pd.Series(int(round(frame.shape[0] / n_gene_cols)),
                            index=wide["__pert__"].unique())
@@ -493,7 +525,8 @@ def _prepare_table(table) -> tuple[pd.DataFrame, dict]:
                 "min_pert_cells 过滤被跳过"
             )
         return wide, {"format": "long", "gene_cols": gene_cols,
-                      "cell_col": None, "n_rows": int(frame.shape[0]),
+                      "cell_col": None, "donor_col": "__donor__" if "__donor__" in wide.columns else None,
+                      "n_rows": int(frame.shape[0]),
                       "counts": counts, "notes": notes, "warnings": warns}
 
     # 宽表
@@ -505,7 +538,11 @@ def _prepare_table(table) -> tuple[pd.DataFrame, dict]:
     work["__pert__"] = pert_series[keep].to_numpy()
     if cell_col is not None:
         work["__cell__"] = work[cell_col].astype(str)
-    excluded = {str(pert_col), "__pert__", "__cell__"}
+    if donor_col is not None:
+        work["__donor__"] = work[donor_col].astype(str)
+    excluded = {str(pert_col), "__pert__", "__cell__", "__donor__"}
+    if donor_col is not None:
+        excluded.add(str(donor_col))
     gene_cols = [c for c in work.columns if c not in excluded and _is_numeric(work[c])]
     if not gene_cols:
         raise err(
@@ -517,6 +554,7 @@ def _prepare_table(table) -> tuple[pd.DataFrame, dict]:
     counts = work.groupby("__pert__", sort=False).size()
     return work, {"format": "wide", "gene_cols": gene_cols,
                   "cell_col": "__cell__" if "__cell__" in work.columns else None,
+                  "donor_col": "__donor__" if "__donor__" in work.columns else None,
                   "n_rows": int(work.shape[0]), "counts": counts,
                   "notes": notes, "warnings": warns}
 
@@ -749,6 +787,14 @@ def _standardize_features(features: np.ndarray):
     return np.asarray(scaled, dtype=float), np.ravel(center).astype(float), np.ravel(scale).astype(float)
 
 
+def _apply_standardize(features: np.ndarray, center: np.ndarray, scale: np.ndarray):
+    """用训练折的 center/scale 变换（含外部测试折）——标准化只能在折内拟合。"""
+    X = np.asarray(features, dtype=float)
+    scale = np.asarray(scale, dtype=float).ravel()
+    scale = np.where(scale < 1e-8, 1.0, scale)
+    return (X - np.asarray(center, dtype=float).ravel()) / scale
+
+
 def _ridge_fit(features: np.ndarray, targets: np.ndarray):
     """拟合多输出 ridge；返回 (w, b, alpha, backend)。features 已标准化。"""
     X = np.asarray(features, dtype=float)
@@ -782,8 +828,27 @@ def _ridge_fit(features: np.ndarray, targets: np.ndarray):
     return w, np.atleast_1d(b).ravel(), alpha, "numpy"
 
 
-def _make_folds(n_pert: int, nfold: int, seed: int) -> tuple[list[tuple[np.ndarray, np.ndarray]], str]:
-    """交叉验证折：扰动少(≤10)用留一，否则 nfold 折 k-fold（固定种子）。"""
+def _make_folds(n_pert: int, nfold: int, seed: int,
+                groups=None) -> tuple[list[tuple[np.ndarray, np.ndarray]], str]:
+    """交叉验证折。
+
+    * 给了 donor/样本分组 → 按组留出（leave-one-group-out），同组扰动不会同时出现在
+      训练折和测试折（避免同源泄漏）；
+    * 否则：扰动少(≤10)用留一，否则 nfold 折 k-fold（固定种子）。
+    """
+    if groups is not None:
+        groups = np.asarray(groups).astype(str).ravel()
+        if groups.size == n_pert:
+            unique = list(dict.fromkeys(groups))
+            if 2 <= len(unique) <= n_pert - 1:
+                folds = []
+                for group in unique:
+                    test = np.where(groups == group)[0].astype(int)
+                    train = np.where(groups != group)[0].astype(int)
+                    if test.size and train.size:
+                        folds.append((train, test))
+                if folds:
+                    return folds, "group_loo"
     if n_pert <= 10 or nfold < 2 or nfold >= n_pert:
         folds = [
             (np.array([j for j in range(n_pert) if j != i], dtype=int), np.array([i], dtype=int))
@@ -935,13 +1000,17 @@ def run_response(bundle, state: dict, table, params: dict) -> dict:
             ctrl_values = control_rows.to_numpy(dtype=float).mean(axis=0)
         n_ctrl_cells = int(counts.loc[control_labels].sum())
     else:
-        ctrl_values = grouped.to_numpy(dtype=float).mean(axis=0)
-        n_ctrl_cells = n_rows
-        warnings.append(
+        # 没有真实对照就没有 Δ 的定义——用全表均值当伪 control 会把「共同平均位移」
+        # 当成基线，绝对幅度与方向都不可解释（旧 bug），这里直接拒绝。
+        raise err(
+            "prerequisite",
             "扰动表没有可识别的 control 行（control/WT/NC/non-targeting）："
-            "已用全表总均值当伪 control，Δ 的绝对幅度会被低估"
+            "扰动响应需要真实匹配对照才能定义 Δ；拒绝用全表均值当伪 control",
+            n_rows=n_rows,
+            columns=[str(c) for c in frame.columns[:20]],
+            how=["在扰动表里保留 control/WT/NC 组（或至少 3 个 control 细胞）后重跑",
+                 "或改用 attach kind=drug_signature 的签名投影（不依赖对照）"],
         )
-        notes.append("伪 control = 全表总均值；建议在扰动表中保留 control 组再重跑")
 
     pert_labels = sorted(str(label) for label in grouped.index if not _is_control(label))
     if not pert_labels:
@@ -978,6 +1047,36 @@ def run_response(bundle, state: dict, table, params: dict) -> dict:
     x_pert = grouped.loc[pert_labels, used_cols].to_numpy(dtype=float)
     delta_table = x_pert - ctrl_values.reshape(1, -1)
 
+    # ---- 2b. donor / 样本分组（同源泄漏防护）---------------------------
+    donor_holdout = False
+    pert_groups = None
+    donor_col = meta.get("donor_col")
+    if donor_col:
+        try:
+            per_pert = (frame.groupby("__pert__")[donor_col]
+                        .agg(lambda values: sorted({str(v).strip() for v in values})))
+        except Exception:  # noqa: BLE001
+            per_pert = None
+        groups = []
+        consistent = per_pert is not None
+        if consistent:
+            for label in pert_labels:
+                donors = per_pert.get(label) or []
+                if len(donors) != 1 or donors[0] == "":
+                    consistent = False
+                    break
+                groups.append(donors[0])
+        if consistent and len(set(groups)) >= 2:
+            pert_groups = np.asarray(groups, dtype=str)
+            donor_holdout = True
+            notes.append(f"检测到分组列 {donor_col}：交叉验证按组留出（leave-one-group-out），"
+                         f"共 {len(set(groups))} 组，同组扰动不会跨训练/测试折")
+        else:
+            warnings.append(
+                f"扰动表含分组列 {donor_col}，但每个扰动没有唯一的组标签（或只有 1 组）："
+                "已退回按扰动留出；同源泄漏风险仍在，建议修正分组列"
+            )
+
     # ---- 3. 基因空间 Δ（bundle.genes 顺序，缺失填 0）-------------------
     progress("响应预测：构建基因空间 Δ…", 42)
     delta_gene = np.zeros((n_pert, n_genes), dtype=float)
@@ -998,7 +1097,7 @@ def run_response(bundle, state: dict, table, params: dict) -> dict:
 
     # ---- 4. 投影到隐空间 ----------------------------------------------
     progress("响应预测：投影到隐空间…", 54)
-    loadings, hvg, hvg_bundle_idx, hvg_rows, n_latent = _load_latent_frame(
+    loadings, hvg, hvg_bundle_idx, hvg_rows, n_latent, hvg_scale = _load_latent_frame(
         state, genes, latent_dim, warnings
     )
     missing_hvg_in_table = int(np.sum(~np.isin(hvg_bundle_idx, bundle_idx)))
@@ -1007,8 +1106,15 @@ def run_response(bundle, state: dict, table, params: dict) -> dict:
             f"{missing_hvg_in_table}/{len(hvg_bundle_idx)} 个 hvg 基因不在扰动表中，"
             "其 Δ 按 0 投影（隐空间响应幅度会被低估）"
         )
-    # Δ_gene_hvg (n_pert × n_hvg_used) · loadings (n_hvg_used × n_latent)
-    delta_latent = delta_gene[:, hvg_bundle_idx] @ loadings[hvg_rows]
+    # Δ_gene_hvg (n_pert × n_hvg_used) ÷ hvg_std · loadings (n_hvg_used × n_latent)
+    # PCA 在 z-score 后的 HVG 上拟合，Δ 在 log 空间，必须同一变换才能投到隐空间。
+    delta_hvg = delta_gene[:, hvg_bundle_idx]
+    if hvg_scale is not None:
+        delta_hvg = delta_hvg / hvg_scale[hvg_rows].reshape(1, -1)
+        delta_projection = "zscore_hvg"
+    else:
+        delta_projection = "log_expression"
+    delta_latent = delta_hvg @ loadings[hvg_rows]
 
     # ---- 5. 特征 + 交叉验证 -------------------------------------------
     progress("响应预测：训练加性模型…", 66)
@@ -1047,29 +1153,50 @@ def run_response(bundle, state: dict, table, params: dict) -> dict:
         )
         effective_method = "mean_shift"
 
+    cv_linear = None
+    fold_groups: list[list[str]] = []
     if n_pert >= 2 and effective_method == "additive":
-        folds, cv_name = _make_folds(n_pert, nfold, seed)
-        scaled_features, _, _ = _standardize_features(features)
-        if float(np.var(scaled_features)) < 1e-12:
+        folds, cv_name = _make_folds(n_pert, nfold, seed, groups=pert_groups)
+        if float(np.var(features)) < 1e-12:
             warnings.append("基线特征方差≈0（扰动名未解析到基因？）：模型退化为均值位移")
             effective_method = "mean_shift"
         else:
             cv_pred = np.zeros_like(delta_latent)
             cv_base = np.zeros_like(delta_latent)
+            cv_linear = np.zeros_like(delta_latent)
             for train, test in folds:
                 train_mean = delta_latent[train].mean(axis=0)
                 cv_base[test] = train_mean
+                # 标准化只在训练折内拟合（旧 bug：CV 外用全量特征 center/scale → 泄漏）
+                scaled_train, center, scale = _standardize_features(features[train])
+                scaled_test = _apply_standardize(features[test], center, scale)
+                if pert_groups is not None:
+                    fold_groups.append(sorted(set(pert_groups[test].tolist())))
+                if float(np.var(scaled_train)) < 1e-12:
+                    cv_pred[test] = train_mean
+                    cv_linear[test] = train_mean
+                    continue
                 try:
                     weights, intercept, alpha, backend = _ridge_fit(
-                        scaled_features[train], delta_latent[train] - train_mean
+                        scaled_train, delta_latent[train] - train_mean
                     )
                 except Exception as exc:  # noqa: BLE001  拟合失败 → 该折退化为均值
                     warnings.append(f"某一折 Ridge 拟合失败，已退化为均值位移：{exc}")
                     cv_pred[test] = train_mean
+                    cv_linear[test] = train_mean
                     continue
                 ridge_alpha = alpha if ridge_alpha is None else ridge_alpha
                 ridge_backend = backend
-                cv_pred[test] = train_mean + scaled_features[test] @ weights + intercept
+                cv_pred[test] = train_mean + scaled_test @ weights + intercept
+                # 简单线性基线：只用 control 表达这一个特征做 OLS（对照"多特征加性模型"）
+                try:
+                    design_train = np.column_stack([np.ones(train.size), scaled_train[:, 0]])
+                    coef, *_ = np.linalg.lstsq(
+                        design_train, delta_latent[train] - train_mean, rcond=None)
+                    design_test = np.column_stack([np.ones(test.size), scaled_test[:, 0]])
+                    cv_linear[test] = train_mean + design_test @ coef
+                except Exception:  # noqa: BLE001
+                    cv_linear[test] = train_mean
             beat_possible = True
 
     if cv_pred is None:
@@ -1095,6 +1222,7 @@ def run_response(bundle, state: dict, table, params: dict) -> dict:
 
     r2 = _r2_matrix(delta_latent, cv_pred) if n_pert >= 2 else None
     baseline_r2 = _r2_matrix(delta_latent, cv_base) if n_pert >= 2 else None
+    baseline_linear_r2 = _r2_matrix(delta_latent, cv_linear) if cv_linear is not None else None
     beats_baseline = bool(
         r2 is not None and baseline_r2 is not None and r2 > baseline_r2 + 1e-9
     )
@@ -1164,7 +1292,8 @@ def run_response(bundle, state: dict, table, params: dict) -> dict:
         f"{n_pert} 个扰动（control {n_ctrl_cells} 细胞，共 {n_cells_used} 细胞）："
         f"{cv_name} 交叉验证 R²={r2_text}（均值位移基线 {base_text}，优于基线：{beat_text}）；"
         f"Spearman={sp_text}；HVG 空间 top-5 基因重合度 {ov_text}；"
-        f"方法={effective_method}，隐空间维度={n_latent}"
+        f"方法={effective_method}，隐空间维度={n_latent}，"
+        f"标准化=折内，留出={'按组(donor)' if donor_holdout else '按扰动'}。"
     )
 
     if effective_method == "mean_shift" and n_pert >= MIN_TRAIN_PERT:
@@ -1175,8 +1304,13 @@ def run_response(bundle, state: dict, table, params: dict) -> dict:
         warnings.append("加性模型未超过均值位移基线：未见扰动的响应更可能由「共享平均位移」主导，"
                         "不要据此宣称可泛化预测")
     notes.append(
-        "隐空间 Δ 由 Δ_gene[hvg]·latent_loadings 投影得到；若 state 的 PCA 基于标准化表达，"
-        "隐空间量纲与原始表达不同（pred/true 的 R²/Spearman 仍在同一空间内自洽）"
+        "隐空间 Δ 由 Δ_gene[hvg]/hvg_std·latent_loadings 投影得到（PCA 在 z-score 后的 HVG 上拟合，"
+        "Δ 在 log 空间，已用 state 保存的 hvg_std 做同一变换）；pred/true 的 R²/Spearman 在同一隐空间内自洽"
+    )
+    notes.append(
+        "交叉验证：标准化只在训练折内拟合（无泄漏）；"
+        + ("按 donor/样本分组留出（leave-one-group-out）；" if donor_holdout else "按扰动留出；")
+        + "基线包含均值位移（baseline_r2）与单特征线性基线（baseline_linear_r2）"
     )
     notes.append(
         "per_gene_err 由隐空间最小范数逆投影 + 全局尺度对齐得到（仅诊断用；"
@@ -1195,10 +1329,15 @@ def run_response(bundle, state: dict, table, params: dict) -> dict:
         "r2": fnum(r2, 4),
         "spearman": fnum(spearman, 4),
         "baseline_r2": fnum(baseline_r2, 4),
+        "baseline_linear_r2": fnum(baseline_linear_r2, 4),
         "baseline_spearman": fnum(baseline_spearman, 4),
         "beats_baseline": beats_baseline,
         "latent_dim": int(n_latent),
         "cv": str(cv_name),
+        "standardization": "in_fold",
+        "donor_holdout": bool(donor_holdout),
+        "fold_groups": [list(item) for item in fold_groups],
+        "delta_projection": delta_projection,
         "n_features": int(n_features),
         "feature_names": feature_names,
         "n_pert_genes_resolved": int(n_resolved),
@@ -1455,10 +1594,12 @@ def project_signature(bundle, state: dict, signature, params: dict) -> dict:
 
     # ---- 2. 投影到隐空间 ----------------------------------------------
     progress("签名投影：投影到隐空间…", 30)
-    loadings, hvg, hvg_bundle_idx, hvg_rows, n_latent = _load_latent_frame(
+    loadings, hvg, hvg_bundle_idx, hvg_rows, n_latent, hvg_scale = _load_latent_frame(
         state, genes, latent_dim, warnings
     )
     s_hvg = sig_vec[hvg_bundle_idx]
+    if hvg_scale is not None:
+        s_hvg = s_hvg / hvg_scale[hvg_rows]
     if not np.any(np.abs(s_hvg) > 1e-12):
         raise err(
             "prerequisite",

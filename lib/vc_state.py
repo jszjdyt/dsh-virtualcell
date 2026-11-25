@@ -112,12 +112,17 @@ def _hvg_seurat(X_log, n_hvg: int, n_bins: int = 20):
     return np.sort(np.argsort(-z, kind="stable")[:n_take].astype(np.int64))
 
 def _zscore_dense(matrix, clip: float = 10.0):
-    """按基因（列）z-score 并 clip ±clip；返回 float32。"""
+    """按基因（列）z-score 并 clip ±clip；返回 (scaled, mean, std)。
+
+    mean/std 必须随 state 一起保存：PCA 是在 **z-score 后的 HVG** 上拟合的，
+    下游 grn/response 在 log 空间算出的 Δ 只有除以同一 std 才能投到隐空间。
+    """
     arr = np.asarray(matrix, dtype=np.float32)
     mean = arr.mean(axis=0, keepdims=True)
     std = arr.std(axis=0, keepdims=True)
     std = np.where(std < 1e-8, 1.0, std)
-    return np.clip((arr - mean) / std, -clip, clip).astype(np.float32)
+    scaled = np.clip((arr - mean) / std, -clip, clip).astype(np.float32)
+    return scaled, mean.ravel().astype(np.float32), std.ravel().astype(np.float32)
 
 def _knn(latent, n_neighbors: int):
     """kNN 图：返回 (idx, dist)，自身邻居已剔除。"""
@@ -228,13 +233,16 @@ def run_qc(bundle, params: dict) -> dict:
     if n_mito:
         cell_mask &= mito_pct <= max_mito
     n_cells_keep = int(cell_mask.sum())
+    # 严格阈值：不足 3 个细胞时**不再**静默回退成全 True（旧 bug：下游拿到假 mask），
+    # 只把这次质控标成 preview_only，mask 保持真实筛选结果，让 state 明确拒绝。
+    preview_only = bool(n_cells_keep < 3)
     fallback_cell = False
-    if n_cells_keep < 3:
+    if preview_only:
         warnings.append(
-            f"按当前阈值仅剩 {n_cells_keep}/{n_cells} 个细胞（<3），质控阈值过严：已回退为全部细胞通过"
+            f"按当前阈值仅剩 {n_cells_keep}/{n_cells} 个细胞（<3）：本次质控结果仅预览"
+            f"（preview_only=True），cell_mask 保持严格筛选、不回退为全 True；"
+            f"请放宽 min_genes/max_mito 等阈值后重跑质控，下游「状态表征」会因有效细胞不足而拒绝运行"
         )
-        cell_mask = np.ones(n_cells, dtype=bool)
-        fallback_cell = True
 
     gene_counts = np.asarray(X.getnnz(axis=0)).ravel().astype(np.int32)
     gene_mask = gene_counts >= min_cells
@@ -247,7 +255,7 @@ def run_qc(bundle, params: dict) -> dict:
     pct_kept = float(100.0 * cell_mask.sum() / max(1, n_cells))
     kept_cells = int(cell_mask.sum())
     kept_genes = int(gene_mask.sum())
-    if pct_kept < 50.0 and not fallback_cell:
+    if pct_kept < 50.0 and not fallback_cell and not preview_only:
         warnings.append(f"质控滤掉了 {100.0 - pct_kept:.1f}% 的细胞，阈值可能过严，请核对 min_genes/max_mito")
     if n_mito:
         med_mito = float(np.median(mito_pct[cell_mask])) if kept_cells else 0.0
@@ -272,7 +280,10 @@ def run_qc(bundle, params: dict) -> dict:
         "max_genes": max_genes,
         "max_mito": fnum(max_mito, 2),
         "min_cells": min_cells,
-        "fallback": bool(fallback_cell or fallback_gene),
+        "fallback": bool(fallback_gene),
+        "fallback_cell": False,
+        "fallback_gene": bool(fallback_gene),
+        "preview_only": bool(preview_only),
         "runtime_s": fnum(time.time() - t0, 3),
     }
 
@@ -309,6 +320,8 @@ def run_qc(bundle, params: dict) -> dict:
         f"{n_genes} → {kept_genes} 个基因；每细胞中位 {metrics['median_n_genes']:.0f} 个基因 / "
         f"{metrics['median_n_counts']:.0f} UMIs，{mito_note}；去除 {n_cells - kept_cells} 个细胞。"
     )
+    if preview_only:
+        summary += "【preview_only】有效细胞 <3，本次仅为预览，下游状态表征会拒绝运行；请放宽阈值重跑。"
 
     return {
         "arrays": {
@@ -416,7 +429,7 @@ def run_state(bundle, params: dict) -> dict:
     X_hvg = np.asarray(X_log[:, hvg_idx].todense(), dtype=np.float32)
     if n_cells * hvg_idx.size >= 2e8:
         warnings.append(f"HVG 稠密矩阵 {n_cells}×{hvg_idx.size} 较大，PCA 内存占用较高")
-    X_hvg = _zscore_dense(X_hvg, clip=10.0)
+    X_hvg, hvg_mean, hvg_std = _zscore_dense(X_hvg, clip=10.0)
 
     from sklearn.decomposition import PCA
     from sklearn.cluster import KMeans
@@ -555,9 +568,12 @@ def run_state(bundle, params: dict) -> dict:
             "knn_dist": np.asarray(knn_dist, dtype=np.float32),
             "latent_loadings": latent_loadings, "cluster_centroids": centroids,
             "embedding_loadings": embedding_loadings,
+            "hvg_mean": hvg_mean, "hvg_std": hvg_std,
         },
         "genes": genes,
         "hvg": hvg,
+        "hvg_mean": hvg_mean,
+        "hvg_std": hvg_std,
         "latent_loadings": latent_loadings,
         "cluster_centroids": centroids,
         "embedding_loadings": embedding_loadings,
@@ -725,7 +741,12 @@ def run_annotate(bundle, state: dict, params: dict) -> dict:
         s2 = float(score_matrix[c, o[1]]) if n_states > 1 else 0.0
         top2 = states[int(o[1])] if n_states > 1 else "Unknown"
         margin = s1 - s2
-        assigned = bool(margin >= min_score)
+        # 归属规则（真实数据比 demo 更混杂）：
+        #   - 证据分 s1 必须达到 min_score（默认 0.3，代表"高于全细胞平均水平"）；
+        #   - margin 很小时（<0.05）只有 s1 很强（>=1.0）才敢归属，否则 Unknown；
+        #   - 归属了但 margin < 0.3 → 标 ambiguous（保留 top1，但提示 top2 也在同一量级）。
+        assigned = bool(s1 >= min_score and (margin >= 0.05 or s1 >= 1.0))
+        ambiguous = bool(assigned and margin < 0.3)
         label = top1 if assigned else "Unknown"
         margins[c] = margin
         labels_per_cluster[c] = int(o[0]) if assigned else n_states
@@ -736,7 +757,8 @@ def run_annotate(bundle, state: dict, params: dict) -> dict:
         evidence = ", ".join(genes[int(i)] for i in top_marker)
         rows.append({"cluster": str(c), "n_cells": int(sizes[c]), "label": label, "top_state": top1,
                      "top_score": fnum(s1, 3), "second_state": top2, "second_score": fnum(s2, 3),
-                     "margin": fnum(margin, 4), "n_markers": int(marker_idx.size), "evidence": evidence})
+                     "margin": fnum(margin, 4), "ambiguous": ambiguous,
+                     "n_markers": int(marker_idx.size), "evidence": evidence})
     labels_per_cell = labels_per_cluster[clusters].astype(np.int32)
     cell_state = [cluster_labels[int(c)] for c in clusters]
     if isinstance(state, dict):  # 同步给 state stage，vc_plot 的 color_by=cell_state 才能着色
@@ -747,10 +769,15 @@ def run_annotate(bundle, state: dict, params: dict) -> dict:
         state_columns[column] = cell_state
     assigned = int(sum(1 for lab in cluster_labels if lab != "Unknown"))
     unknown = int(k - assigned)
+    ambiguous_count = int(sum(1 for row in rows if row.get("ambiguous")))
     assigned_cells = int(sum(int(sizes[c]) for c in range(k) if cluster_labels[c] != "Unknown"))
     mean_margin = float(np.mean(margins)) if k else 0.0
     if unknown:
-        warnings.append(f"{unknown}/{k} 个状态簇的 top1-top2 margin < {min_score}，已标为 Unknown（参考面板覆盖不足或状态混合）")
+        warnings.append(f"{unknown}/{k} 个状态簇证据分 < {min_score} 或与第二名几乎并列，已标为 Unknown"
+                        "（参考面板覆盖不足或状态混合；可上传自定义 marker 面板）")
+    if ambiguous_count:
+        warnings.append(f"{ambiguous_count} 个状态簇虽然归属成功，但与第二名得分接近（margin < 0.3），"
+                        "标签是 top1 推断，请结合 marker 表核对")
     if n_states <= 2:
         warnings.append(f"面板只有 {n_states} 个参考状态可用，注释特异性有限")
     notes.append(f"注释面板：{len(panel_markers)} 个参考状态，其中 {n_states} 个在矩阵中有 marker；method={method}")
@@ -758,7 +785,9 @@ def run_annotate(bundle, state: dict, params: dict) -> dict:
     best_pos = int(np.argmax(score_matrix.max(axis=0)))
     best = float(score_matrix[:, best_pos].max())
     summary = (
-        f"状态注释：{k} 个状态簇中 {assigned} 个匹配参考面板、{unknown} 个 Unknown（覆盖 {assigned_cells}/{n_cells} 个细胞）；"
+        f"状态注释：{k} 个状态簇中 {assigned} 个匹配参考面板"
+        + (f"（其中 {ambiguous_count} 个与第二名接近）" if ambiguous_count else "")
+        + f"、{unknown} 个 Unknown（覆盖 {assigned_cells}/{n_cells} 个细胞）；"
         f"平均 margin {mean_margin:.2f}；最高分 {best:.2f} 对应 {states[best_pos]}（{method} 打分）。"
     )
     return {
@@ -768,7 +797,8 @@ def run_annotate(bundle, state: dict, params: dict) -> dict:
         "cells_columns": {column: cell_state},
         "column": column,
         "metrics": {
-            "assigned": assigned, "unknown": unknown, "mean_margin": fnum(mean_margin, 4),
+            "assigned": assigned, "unknown": unknown, "ambiguous": ambiguous_count,
+            "mean_margin": fnum(mean_margin, 4),
             "assigned_cells": assigned_cells, "unknown_cells": int(n_cells - assigned_cells),
             "n_states": n_states, "n_clusters": k, "method": method, "panel": str(panel),
             "runtime_s": fnum(runtime, 3),
@@ -780,6 +810,7 @@ def run_annotate(bundle, state: dict, params: dict) -> dict:
                 "label": cluster_labels,
                 "n_cells": np.bincount(clusters, minlength=k).astype(np.int64),
                 "pct": [fnum(100.0 * sizes[c] / max(1, n_cells), 2) for c in range(k)],
+                "ambiguous": [bool(rows[c].get("ambiguous")) for c in range(k)],
             })},
         ],
         "figures": [{"kind": "state_embedding", "title": "状态注释", "params": {"color_by": column}}],
@@ -822,6 +853,7 @@ def run_transition(bundle, state: dict, params: dict) -> dict:
     seed = int(p.get("seed", 0) or 0)
     n_boot = int(p.get("n_boot", 100) if p.get("n_boot") is not None else 100)
     warnings: list[str] = []
+    notes: list[str] = []
 
     state = state if isinstance(state, dict) else {}
     arrays = state.get("arrays") if isinstance(state.get("arrays"), dict) else state
@@ -872,8 +904,9 @@ def run_transition(bundle, state: dict, params: dict) -> dict:
             rels.append(float(np.linalg.norm(T_b - T)) / base_norm)
         stability = float(max(0.0, min(1.0, 1.0 - float(np.mean(rels)))))
     else:
-        stability = 1.0
-        warnings.append("n_boot=0，未做 bootstrap 稳定性估计（stability 记为 1）")
+        # 不做 bootstrap 就没有稳定性估计——不要用 1.0 伪装成"完美稳定"。
+        stability = None
+        warnings.append("n_boot=0，未做 bootstrap 稳定性估计（stability 记为 null，不可当作稳定）")
 
     names = [str(x) for x in (state.get("cluster_labels") or [])]
     if len(names) != k_states:
@@ -902,6 +935,11 @@ def run_transition(bundle, state: dict, params: dict) -> dict:
         warnings.append(f"转移矩阵对角均值 {diag_mean:.3f} 接近均匀，状态间没有明显方向性")
     if not net_flow:
         warnings.append("状态间净流几乎为 0，转移矩阵接近对称")
+    direction_note = (
+        "源/汇与净流方向由**静态** kNN 图（无时间信息、无拟时序）导出，只能当作候选方向假说；"
+        "要谈命运方向需要 RNA velocity / 拟时序 / 谱系追踪等独立证据。"
+    )
+    warnings.append(direction_note)
     matrix_rows = pd.DataFrame(T, columns=names)
     matrix_rows.insert(0, "from", names)
     runtime = time.time() - t0
@@ -918,11 +956,19 @@ def run_transition(bundle, state: dict, params: dict) -> dict:
         top_txt = "无明显净转移"
     src_txt = f"{sources[0]['cluster']}（{sources[0]['flow']:+.3f}）" if sources else "无明显源"
     sink_txt = f"{sinks[0]['cluster']}（{sinks[0]['flow']:+.3f}）" if sinks else "无明显汇"
+    stability_txt = ("未做 bootstrap" if stability is None
+                     else f"bootstrap 稳定度 {stability:.2f}（{int(max(0, n_boot))} 次）")
     summary = (
-        f"状态转移：{k_states} 个状态、{n_cells} 个细胞、{int(n_cells * kk)} 条 kNN 边；"
-        f"对角均值 {diag_mean:.2f}，最强净转移 {top_txt}；"
-        f"主净流出 {src_txt}、主净流入 {sink_txt}；bootstrap 稳定度 {stability:.2f}（{int(max(0, n_boot))} 次）。"
+        f"状态转移（候选方向假说）：{k_states} 个状态、{n_cells} 个细胞、{int(n_cells * kk)} 条 kNN 边；"
+        f"对角均值 {diag_mean:.2f}，最强净转移 {top_txt}（静态图近似，非真实动力学）；"
+        f"主净流出 {src_txt}、主净流入 {sink_txt}；{stability_txt}。"
     )
+    validity = {
+        "direction_evidence": "candidate_hypothesis",
+        "notes": [direction_note,
+                  "转移矩阵是 kNN 细胞相似度的静态近似；源/汇标签与 net_flow 不构成命运证据。"],
+    }
+    notes = list(notes or []) + ["方向性仅供提出假说，需 velocity/拟时序/谱系追踪或实验验证。"]
     return {
         "arrays": {"T": np.asarray(T, dtype=np.float64)},
         "sources": sources,
@@ -930,6 +976,9 @@ def run_transition(bundle, state: dict, params: dict) -> dict:
         "net_flow": net_flow,
         "cluster_names": names,
         "metrics": metrics,
+        "direction_evidence": "candidate_hypothesis",
+        "validity": validity,
+        "notes": notes,
         "tables": [{"id": "transition_matrix", "title": "状态转移矩阵", "rows": matrix_rows}],
         "figures": [
             {"kind": "transition_matrix", "title": "状态转移矩阵"},
