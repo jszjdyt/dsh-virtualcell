@@ -526,5 +526,19 @@
  "atTime": "时间",
  "units": "个",
  "importObject": "RData 对象名",
- "importObjectHint": "R 文件里（.RData/.rda）有多个对象时填要找的那个；.rds 一般留空"
+ "importObjectHint": "R 文件里（.RData/.rda）有多个对象时填要找的那个；.rds 一般留空",
+ "contractTitle": "统计口径",
+ "contractHint": "口径 = 数据规模 + 状态表征/调控网络/虚拟扰动的实际参数；随状态刷新，产物均为模型推演。",
+ "contractOk": "可引用",
+ "contractWarn": "待注意",
+ "contractNoResult": "还没有分析记录",
+ "contractData": "数据",
+ "contractStates": "状态结构",
+ "contractModel": "模型参数",
+ "contractInference": "最近分析",
+ "contractCaveats": "引用前必须处理",
+ "contractEvidence": "证据类型",
+ "contractEvidenceModel": "模型推演",
+ "contractMissing": "未取到",
+ "contractNoPerturb": "还没有虚拟扰动"
 }

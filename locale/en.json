@@ -526,5 +526,19 @@
  "atTime": "time",
  "units": "",
  "importObject": "R object name",
- "importObjectHint": "For .RData/.rda with several objects, name the one to import; leave empty for .rds"
+ "importObjectHint": "For .RData/.rda with several objects, name the one to import; leave empty for .rds",
+ "contractTitle": "Statistical contract",
+ "contractHint": "Contract = data scale + actual parameters of the state/GRN/perturbation models; refreshes with state and every output is a model prediction.",
+ "contractOk": "Citable",
+ "contractWarn": "Needs attention",
+ "contractNoResult": "No analysis yet",
+ "contractData": "Data",
+ "contractStates": "State structure",
+ "contractModel": "Model parameters",
+ "contractInference": "Latest analysis",
+ "contractCaveats": "Fix before citing",
+ "contractEvidence": "Evidence type",
+ "contractEvidenceModel": "Model prediction",
+ "contractMissing": "not captured",
+ "contractNoPerturb": "No virtual perturbation yet"
 }

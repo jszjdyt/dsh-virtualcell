@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Python 轻依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install numpy pandas scipy scikit-learn matplotlib seaborn openpyxl pillow networkx statsmodels lifelines anndata h5py
+
+      - name: 语法闸门（JS / Python）
+        run: |
+          for f in index.js client.js; do [ -f "$f" ] && node --check "$f"; done
+          find lib bin -name '*.mjs' -o -name '*.js' 2>/dev/null | while read -r f; do node --check "$f"; done
+          find lib bin -name '*.py' 2>/dev/null | while read -r f; do python -m py_compile "$f"; done
+          find test -name '*.py' 2>/dev/null | while read -r f; do python -m py_compile "$f"; done
+
+      - name: 插件契约（name/version/license/files/入口/无绝对路径/版本一致性）
+        run: node scripts/ci_contract.mjs
+
+      - name: 离线测试（清单见 package.json.ci）
+        run: node scripts/ci_light.mjs
